@@ -330,9 +330,17 @@ for sec, reps in EXTRA_REPRESENTATIVES.items():
 @dataclass
 class StockAnalysisResult:
     """股票分析結果資料類別"""
+    stock_id: str
+    score: int
+    reasons: List[str]
     tech_df: pd.DataFrame
     fundamentals: Dict[str, Any]
     chips_df: Optional[pd.DataFrame] = None
+    
+    @property
+    def status_summary(self) -> str:
+        """生成狀態摘要"""
+        return " / ".join(self.reasons) if self.reasons else "無符合項目"
 
 # ==========================================
 # 3. 資料提供者 (Data Providers)
