@@ -327,7 +327,12 @@ for sec, reps in EXTRA_REPRESENTATIVES.items():
 # ==========================================
 # 2. 資料模型 (DTO)
 # ==========================================
-# 注意：真正的 `StockAnalysisResult` 定義位於下方「資料模型」區塊，這裡僅保留章節標題。
+@dataclass
+class StockAnalysisResult:
+    """股票分析結果資料類別"""
+    tech_df: pd.DataFrame
+    fundamentals: Dict[str, Any]
+    chips_df: Optional[pd.DataFrame] = None
 
 # ==========================================
 # 3. 資料提供者 (Data Providers)
