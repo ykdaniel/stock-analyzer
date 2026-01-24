@@ -418,6 +418,148 @@ class SectorProvider:
             info_map[sid] = row['stock_name']
         return info_map
 
+class TechProvider:
+    """負責處理技術與價格資料 (yfinance)"""
+    
+    @staticmethod
+    def fetch_data(stock_id: str, start_date):
+        """
+        下載技術資料供指標與策略判斷使用
+        
+        說明：
+        - 策略計算需要比 UI 起始日更長的歷史，用來供 MA60、RSI 等指標穩定收斂
+        - 接收 UI 傳入的 start_date，但實際抓取區間會「往前多抓約 100 天」，同時最多回溯 5 年
+        - yfinance 的 end 參數為「到但不含 end 當日」，因此會將 end 設為「明天」，避免漏掉今天
+        """
+        today = pd.Timestamp.today().normalize()
+        base_end = today + pd.DateOffset(days=1)  # 避免漏抓今天
+
+        # UI 給的分析起始日（若無，預設為 5 年前）
+        try:
+            user_start = pd.to_datetime(start_date).normalize() if start_date is not None else today - pd.DateOffset(years=5)
+        except Exception:
+            user_start = today - pd.DateOffset(years=5)
+
+        # 為技術指標預留 100 天的緩衝區間
+        buffered_start = user_start - pd.Timedelta(days=100)
+        five_years_ago = today - pd.DateOffset(years=5)
+        start = max(buffered_start, five_years_ago)
+        end = base_end
+
+        df = yf.download(stock_id, start=start, end=end, progress=False)
+        
+        # 處理 yfinance 多層索引
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+            
+        # 允許較短歷史資料（下限可調）
+        MIN_REQUIRED_ROWS = 30
+        if df.empty or len(df) < MIN_REQUIRED_ROWS:
+            return None
+        
+        return TechProvider._process_indicators(df)
+
+    @staticmethod
+    def fetch_data_batch(tickers: List[str], start_date):
+        """批量下載多檔股票資料 (優化效能)"""
+        today = pd.Timestamp.today().normalize()
+        base_end = today + pd.DateOffset(days=1)
+
+        try:
+            user_start = pd.to_datetime(start_date).normalize() if start_date is not None else today - pd.DateOffset(years=5)
+        except Exception:
+            user_start = today - pd.DateOffset(years=5)
+
+        buffered_start = user_start - pd.Timedelta(days=100)
+        five_years_ago = today - pd.DateOffset(years=5)
+        start = max(buffered_start, five_years_ago)
+        end = base_end
+
+        if not tickers:
+            return {}
+        
+        print(f"DEBUG: Batch downloading {len(tickers)} stocks...")
+        data = yf.download(tickers, start=start, end=end, group_by='ticker', progress=False, threads=True)
+        
+        result_dfs = {}
+        
+        # 如果只有一檔，yfinance 回傳的結構不同，需標準化
+        if len(tickers) == 1:
+            t = tickers[0]
+            df = data
+            processed = TechProvider._process_indicators(df)
+            if processed is not None:
+                result_dfs[t] = processed
+            return result_dfs
+
+        # 多檔處理
+        for t in tickers:
+            try:
+                df = data[t].dropna(how='all') 
+                processed = TechProvider._process_indicators(df)
+                if processed is not None:
+                    result_dfs[t] = processed
+            except Exception:
+                continue
+                
+        return result_dfs
+
+    @staticmethod
+    def _process_indicators(df: pd.DataFrame):
+        """(內部方法) 為 DataFrame 計算技術指標"""
+        if df.empty or len(df) < 30:
+            return None
+        
+        df = df.copy()
+        try:
+            df.index = pd.to_datetime(df.index)
+        except Exception:
+            pass
+        
+        # --- 均線計算 ---
+        df['MA5'] = df['Close'].rolling(window=5).mean()
+        df['MA10'] = df['Close'].rolling(window=10).mean()
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['MA60'] = df['Close'].rolling(window=60).mean()
+        df['MA60_Slope'] = df['MA60'].diff()
+        df['MA60_Rising'] = df['MA60_Slope'].rolling(3).min() > 0 
+
+        # 短線多頭啟動訊號
+        df['Break_Price_MA5'] = (
+            (df['Close'].shift(1) <= df['MA5'].shift(1)) &
+            (df['Close'] > df['MA5'])
+        )
+        df['MA5_Break_MA10'] = (
+            (df['MA5'].shift(1) <= df['MA10'].shift(1)) &
+            (df['MA5'] > df['MA10'])
+        )
+        df['MA5_Up'] = df['MA5'] > df['MA5'].shift(1)
+        
+        # 成交量
+        df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
+        df['Vol_Up'] = df['Volume'] > df['Vol_MA5']
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+
+        # 關鍵位置
+        df['High_60'] = df['High'].rolling(60).max()
+        df['Low_60'] = df['Low'].rolling(60).min()
+
+        # RSI
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = -delta.where(delta < 0, 0).rolling(14).mean()
+        rs = gain / (loss + 1e-10)  # 避免除零
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        # MACD
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = ema12 - ema26
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
+        return df
+
 class ChipProvider:
     """負責處理籌碼面資料 (FinMind) - 穩健版"""
     
