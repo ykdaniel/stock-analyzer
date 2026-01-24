@@ -319,12 +319,38 @@ def get_stock_display_name(code: str) -> str:
         return code
 
 def add_to_watchlist(code: str, name: str):
-    """將股票加入觀察清單（避免重複）。"""
-    if 'watchlist' not in st.session_state:
-        st.session_state['watchlist'] = []
-    wl = st.session_state['watchlist']
+    """將股票加入觀察清單（避免重複），並保存到文件。"""
+    # 確保觀察清單文件路徑
+    DATA_DIR = os.path.abspath(os.path.dirname(__file__))
+    WATCHLIST_FILE = os.path.join(DATA_DIR, 'watchlist.json')
+    
+    # 從文件加載現有觀察清單
+    def load_watchlist():
+        try:
+            if os.path.exists(WATCHLIST_FILE):
+                with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception:
+            return []
+        return []
+    
+    def save_watchlist(data):
+        try:
+            with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            st.error(f"保存觀察清單失敗：{e}")
+    
+    # 從文件加載
+    wl = load_watchlist()
+    
+    # 檢查是否已存在
     if not any(item.get('code') == code for item in wl):
         wl.append({'code': code, 'name': name})
+        # 保存到文件
+        save_watchlist(wl)
+        # 更新 session_state
+        st.session_state['watchlist'] = wl
 
 # 若某些類股為空，為下拉選單提供代表性成分（僅作為掃描示例，不修改 `STOCK_DB`）
 EXTRA_REPRESENTATIVES = {
@@ -2224,7 +2250,19 @@ if 'scan_results_tw50' not in st.session_state: st.session_state['scan_results_t
 if 'scan_results_sector_buy' not in st.session_state: st.session_state['scan_results_sector_buy'] = None
 if 'scan_results_sector_warn' not in st.session_state: st.session_state['scan_results_sector_warn'] = None
 if 'scan_results_ma5_breakout' not in st.session_state: st.session_state['scan_results_ma5_breakout'] = None
-if 'watchlist' not in st.session_state: st.session_state['watchlist'] = []
+
+# 從文件加載觀察清單
+if 'watchlist' not in st.session_state:
+    DATA_DIR = os.path.abspath(os.path.dirname(__file__))
+    WATCHLIST_FILE = os.path.join(DATA_DIR, 'watchlist.json')
+    try:
+        if os.path.exists(WATCHLIST_FILE):
+            with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
+                st.session_state['watchlist'] = json.load(f)
+        else:
+            st.session_state['watchlist'] = []
+    except Exception:
+        st.session_state['watchlist'] = []
 
 page_options = ["🏆 台灣50 (排除金融)", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
 
@@ -3003,7 +3041,16 @@ elif mode == "⭐ 觀察清單":
                     st.rerun()
             with col2:
                 if st.button("🗑 從觀察清單移除", key="watch_remove"):
+                    # 更新 session_state
                     st.session_state['watchlist'] = [w for w in watchlist if w.get('code') != code_sel]
+                    # 保存到文件
+                    DATA_DIR = os.path.abspath(os.path.dirname(__file__))
+                    WATCHLIST_FILE = os.path.join(DATA_DIR, 'watchlist.json')
+                    try:
+                        with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+                            json.dump(st.session_state['watchlist'], f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        st.error(f"保存觀察清單失敗：{e}")
                     st.success(f"已從觀察清單移除：{code_sel} {name_sel}")
                     st.rerun()
             with col3:
