@@ -3022,39 +3022,67 @@ elif mode == "⭐ 觀察清單":
             "最新價": latest_prices,
         })
 
+        # 保存觀察清單到文件的輔助函數
+        def save_watchlist_to_file():
+            DATA_DIR = os.path.abspath(os.path.dirname(__file__))
+            WATCHLIST_FILE = os.path.join(DATA_DIR, 'watchlist.json')
+            try:
+                with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(st.session_state['watchlist'], f, ensure_ascii=False, indent=2)
+                return True
+            except Exception as e:
+                st.error(f"保存觀察清單失敗：{e}")
+                return False
+        
+        # 頂部操作按鈕：清空全部
+        col_top1, col_top2 = st.columns([1, 4])
+        with col_top1:
+            if st.button("🗑 清空全部", type="secondary", key="clear_all_watchlist", use_container_width=True):
+                if st.session_state.get('confirm_clear_all', False):
+                    st.session_state['watchlist'] = []
+                    if save_watchlist_to_file():
+                        st.success("已清空觀察清單")
+                        st.session_state['confirm_clear_all'] = False
+                        st.rerun()
+                else:
+                    st.session_state['confirm_clear_all'] = True
+                    st.warning("⚠️ 點擊「清空全部」按鈕後，將刪除所有觀察清單項目。請再次點擊確認。")
+        
+        if st.session_state.get('confirm_clear_all', False):
+            st.info("💡 再次點擊「清空全部」按鈕以確認刪除，或點擊下方「取消」按鈕取消操作。")
+            if st.button("❌ 取消", key="cancel_clear_all"):
+                st.session_state['confirm_clear_all'] = False
+                st.rerun()
+        
         st.subheader("目前觀察清單")
-        event_w = st.dataframe(df_watch, on_select="rerun", selection_mode="single-row",
-                               use_container_width=True, hide_index=True,
-                               key="watchlist_df")
-
-        if len(event_w.selection.rows) > 0:
-            idx = event_w.selection.rows[0]
-            code_sel = df_watch.iloc[idx]['代號']
-            name_sel = df_watch.iloc[idx]['名稱']
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if st.button("🔍 前往個股體檢", key="watch_to_detail"):
-                    st.session_state['target_stock'] = code_sel
-                    st.session_state['previous_page'] = "⭐ 觀察清單"
-                    st.session_state['current_page'] = "🔍 單一個股體檢"
-                    st.rerun()
-            with col2:
-                if st.button("🗑 從觀察清單移除", key="watch_remove"):
+        
+        # 顯示表格，每行添加刪除按鈕
+        for i, row in df_watch.iterrows():
+            code_sel = row['代號']
+            name_sel = row['名稱']
+            price_sel = row['最新價']
+            
+            col_info, col_action = st.columns([4, 1])
+            with col_info:
+                price_display = f"{price_sel:.2f}" if price_sel is not None else "N/A"
+                st.markdown(f"**{code_sel}** - {name_sel} | 最新價: {price_display}")
+            with col_action:
+                if st.button("🗑 刪除", key=f"delete_{code_sel}_{i}", type="secondary", use_container_width=True):
                     # 更新 session_state
                     st.session_state['watchlist'] = [w for w in watchlist if w.get('code') != code_sel]
                     # 保存到文件
-                    DATA_DIR = os.path.abspath(os.path.dirname(__file__))
-                    WATCHLIST_FILE = os.path.join(DATA_DIR, 'watchlist.json')
-                    try:
-                        with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
-                            json.dump(st.session_state['watchlist'], f, ensure_ascii=False, indent=2)
-                    except Exception as e:
-                        st.error(f"保存觀察清單失敗：{e}")
-                    st.success(f"已從觀察清單移除：{code_sel} {name_sel}")
-                    st.rerun()
-            with col3:
-                st.write("")  # 佔位，方便未來加其他操作
+                    if save_watchlist_to_file():
+                        st.success(f"已刪除：{code_sel} {name_sel}")
+                        st.rerun()
+            
+            # 點擊行可以進入個股體檢
+            if st.button(f"🔍 檢視 {code_sel}", key=f"view_{code_sel}_{i}", use_container_width=True):
+                st.session_state['target_stock'] = code_sel
+                st.session_state['previous_page'] = "⭐ 觀察清單"
+                st.session_state['current_page'] = "🔍 單一個股體檢"
+                st.rerun()
+            
+            st.divider()
 
 elif mode == "🔍 單一個股體檢":
     col_h, col_b = st.columns([6, 1])
