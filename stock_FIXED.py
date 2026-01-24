@@ -539,6 +539,7 @@ class TechProvider:
         df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
         df['Vol_Up'] = df['Volume'] > df['Vol_MA5']
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+        df['Vol_MA60'] = df['Volume'].rolling(window=60).mean()
 
         # 關鍵位置
         df['High_60'] = df['High'].rolling(60).max()
@@ -551,12 +552,16 @@ class TechProvider:
         rs = gain / (loss + 1e-10)  # 避免除零
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # MACD
+        # MACD（使用台股常見命名：DIF, DEA）
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
-        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        df['DIF'] = ema12 - ema26  # 快線
+        df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()  # 慢線
+        df['MACD_Hist'] = df['DIF'] - df['DEA']  # 柱狀圖
+        
+        # 同時保留 MACD/MACD_Signal 命名（向後相容）
+        df['MACD'] = df['DIF']
+        df['MACD_Signal'] = df['DEA']
 
         # KDJ 指標 (9, 3, 3)
         low_min = df['Low'].rolling(window=9).min()
@@ -873,8 +878,8 @@ def analyze_stock(stock_id, start_date, include_chips=False) -> Optional["StockA
         if peg is not None and peg <= 1.2: score += 1; passed_reasons.append("PEG優")
         
         earnings_growth = info.get('earningsGrowth', None)
-        if earnings_growth is not None and earnings_growth > 0: 
-            score += 1; passed_reasons.append("EPS成長")
+        if earnings_growth is not None and earnings_growth > 0.1: 
+            score += 1; passed_reasons.append("EPS成長>10%")
         elif info.get('trailingEps', 0) > 0: score += 0.5 
 
         revenue_growth = info.get('revenueGrowth', 0)
