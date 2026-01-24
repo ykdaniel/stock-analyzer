@@ -558,6 +558,14 @@ class TechProvider:
         df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
+        # KDJ 指標 (9, 3, 3)
+        low_min = df['Low'].rolling(window=9).min()
+        high_max = df['High'].rolling(window=9).max()
+        rsv = (df['Close'] - low_min) / (high_max - low_min + 1e-10) * 100  # 避免除零
+        df['K'] = rsv.ewm(com=2, adjust=False).mean()  # alpha=1/3 -> com=2
+        df['D'] = df['K'].ewm(com=2, adjust=False).mean()
+        df['J'] = 3 * df['K'] - 2 * df['D']
+
         return df
 
 class ChipProvider:
