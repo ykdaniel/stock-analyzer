@@ -251,6 +251,28 @@ for s in EXTRA_SECTORS_FOR_DROPDOWN:
 
 FULL_MARKET_DEMO = [c for c in STOCK_DB.keys() if c not in BAD_TICKERS]
 
+def normalize_stock_id(code: str) -> str:
+    """
+    標準化股票代號：自動補上 .TW 後綴並轉大寫
+    
+    範例：
+    - "2330" -> "2330.TW"
+    - "2330.tw" -> "2330.TW"
+    - "2330.TW" -> "2330.TW"
+    """
+    try:
+        if not code or not isinstance(code, str):
+            return code
+        s = code.strip()
+        if s == '':
+            return s
+        if '.' in s:
+            parts = s.split('.', 1)
+            return parts[0].upper() + '.' + parts[1].upper()
+        return s.upper() + '.TW'
+    except Exception:
+        return code
+
 @st.cache_data(ttl=86400)
 def get_stock_display_name(code: str) -> str:
     """
