@@ -2286,7 +2286,13 @@ def clear_temp_data():
         st.session_state.pop(k, None)
 
 
-start_date = st.sidebar.date_input("分析起始日", pd.to_datetime("2024-01-01"))
+# 預設為一個月前
+default_start_date = pd.Timestamp.today() - pd.DateOffset(months=1)
+start_date = st.sidebar.date_input(
+    "分析起始日", 
+    default_start_date,
+    help="主要影響趨勢圖的顯示範圍，不影響技術指標與策略判斷的計算"
+)
 
 # 偵測分析起始日是否變更，若有變更則清空暫存資料
 prev_start = st.session_state.get('prev_analysis_start_date')
