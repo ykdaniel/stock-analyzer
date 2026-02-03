@@ -42,9 +42,9 @@ except ImportError:
     FINMIND_AVAILABLE = False
     st.error("❌ 未安裝 FinMind 套件。請執行 `pip install FinMind` 以啟用籌碼功能。")
 
-# 顏色設定 (紅漲綠跌：符合台股常用習慣)
-COLOR_UP = 'red'    # 上漲
-COLOR_DOWN = 'green'  # 下跌
+# 顏色設定 (Antigravity 專業版：旗艦紅綠配色)
+COLOR_UP = '#FF4B4B'    # 鮮豔紅 (上漲)
+COLOR_DOWN = '#00C853'  # 活力綠 (下跌)
 
 # ==========================================
 # 1. 資料庫定義 (SSOT)
@@ -219,6 +219,33 @@ TAIWAN50_TICKERS = [
 TAIWAN50_EX_FIN_TICKERS = [
     t for t in TAIWAN50_TICKERS
     if not (t.startswith("288") or t.startswith("289") or t in {"5871.TW", "5876.TW"})
+]
+
+# ==========================================
+# AI 概念股清單
+# ==========================================
+# 說明：涵蓋 AI 伺服器供應鏈、散熱、CoWoS 先進封裝、ASIC、網通等 AI 相關概念股
+AI_CONCEPT_TICKERS = [
+    "2330.TW",  # 台積電 (AI晶片代工)
+    "2454.TW",  # 聯發科 (AI晶片設計)
+    "2382.TW",  # 廣達 (AI伺服器)
+    "3231.TW",  # 緯創 (AI伺服器)
+    "6669.TW",  # 緯穎 (雲端伺服器)
+    "2317.TW",  # 鴻海 (AI伺服器代工)
+    "3017.TW",  # 奇鋐 (AI散熱)
+    "2345.TW",  # 智邦 (AI網通)
+    "3661.TW",  # 世芯-KY (ASIC設計)
+    "6415.TW",  # 矽力-KY (電源管理IC)
+    "2379.TW",  # 瑞昱 (網通晶片)
+    "3034.TW",  # 聯詠 (驅動IC/AI邊緣)
+    "2376.TW",  # 技嘉 (AI伺服器/顯卡)
+    "2357.TW",  # 華碩 (AI PC)
+    "3443.TW",  # 創意 (ASIC設計服務)
+    "2383.TW",  # 台光電 (CCL/AI伺服器)
+    "3037.TW",  # 欣興 (ABF載板)
+    "3711.TW",  # 日月光投控 (先進封裝)
+    "2308.TW",  # 台達電 (電源/散熱)
+    "6515.TW",  # 穎崴 (探針卡)
 ]
 
 # 動態生成衍生資料
@@ -1486,19 +1513,19 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
         if market_regime == "BULL":
             regime_icon = "📈"
             regime_txt = "BULL（多頭市場）"
-            regime_color = "green"
+            regime_color = COLOR_UP
         elif market_regime == "NEUTRAL":
             regime_icon = "📊"
             regime_txt = "NEUTRAL（盤整市場）"
-            regime_color = "orange"
+            regime_color = "#FFA000" # 深橘色
         elif market_regime == "BEAR":
             regime_icon = "📉"
             regime_txt = "BEAR（空頭市場）"
-            regime_color = "red"
+            regime_color = COLOR_DOWN
         else:
             regime_icon = "❓"
             regime_txt = "未知"
-            regime_color = "gray"
+            regime_color = "#757575" # 灰色
         
         # 信心度進度條
         st.markdown(f"**市場狀態**：{regime_icon} {regime_txt}")
@@ -1765,15 +1792,15 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     elif msg_color == "warning": st.warning(f"**{msg_title}**\n\n{msg_desc}")
     else: st.error(f"**{msg_title}**\n\n{msg_desc}")
 
-    # 價格分級表
-    row1_style = "background-color: #e8f5e9" if action_type == "積極攻擊" else ""
-    row2_style = "background-color: #e3f2fd" if action_type == "防守等待" else ""
+    # 價格分級表 (適配深色模式)
+    row1_style = "background-color: #1B5E20; color: #FAFAFA;" if action_type == "積極攻擊" else ""
+    row2_style = "background-color: #0D47A1; color: #FAFAFA;" if action_type == "防守等待" else ""
     
     st.markdown(f"""
     <style> .stTable td {{ vertical-align: middle; }} </style>
-    <table style="width:100%; text-align: left; border-collapse: collapse;">
+    <table style="width:100%; text-align: left; border-collapse: collapse; color: #FAFAFA;">
         <thead>
-            <tr style="border-bottom: 2px solid #ddd; background-color: #f0f2f6;">
+            <tr style="border-bottom: 2px solid #444; background-color: #262730;">
                 <th style="padding: 8px;">角色</th>
                 <th style="padding: 8px;">價格 (約)</th>
                 <th style="padding: 8px;">策略意義</th>
@@ -1799,7 +1826,7 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
                 <td style="padding: 8px;">MA60 (季線)</td>
                 <td style="padding: 8px;"><strong>中期多頭防守線。</strong></td>
             </tr>
-            <tr style="border-top: 1px solid #ddd; color: red;">
+            <tr style="border-top: 1px solid #444; color: #FF4B4B;">
                 <td style="padding: 8px;">🛑 <strong>停損參考</strong></td>
                 <td style="padding: 8px;">{price_defensive * 0.98:.2f}</td>
                 <td style="padding: 8px;">跌破季線 2%</td>
@@ -1934,8 +1961,7 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
             x0=0.0,
             x1=1.0,
             y0=y,
-            y1=y,
-            line=dict(color="#b0b0b0", width=2, dash="dot"),
+            line=dict(color="#444444", width=2, dash="dot"),
         )
         for y in (0.29, 0.56, 0.83)
     ]
@@ -1946,6 +1972,9 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
         title_text=f"{stock_id} 綜合分析圖",
         hovermode='x unified',
         shapes=sep_shapes,
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
     )
     
     # 設定 Y 軸標題
@@ -2132,12 +2161,13 @@ if 'scan_results_tw50' not in st.session_state: st.session_state['scan_results_t
 if 'scan_results_sector_buy' not in st.session_state: st.session_state['scan_results_sector_buy'] = None
 if 'scan_results_sector_warn' not in st.session_state: st.session_state['scan_results_sector_warn'] = None
 if 'scan_results_ma5_breakout' not in st.session_state: st.session_state['scan_results_ma5_breakout'] = None
+if 'scan_results_ai_concept' not in st.session_state: st.session_state['scan_results_ai_concept'] = None
 
 # 從文件加載觀察清單
 if 'watchlist' not in st.session_state:
     st.session_state['watchlist'] = load_watchlist()
 
-page_options = ["🏆 台灣50 (排除金融)", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
+page_options = ["🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
 
 def update_nav(): st.session_state['current_page'] = st.session_state['nav_radio']
 try: nav_index = page_options.index(st.session_state['current_page'])
@@ -2150,6 +2180,7 @@ def clear_temp_data():
     """清除會受條件改變影響的暫存結果，避免 UI 顯示舊資料。"""
     for k in [
         'scan_results_tw50',
+        'scan_results_ai_concept',
         'scan_results_sector_buy',
         'scan_results_sector_warn',
         'scan_results_ma5_breakout',
@@ -2214,6 +2245,46 @@ if mode == "🏆 台灣50 (排除金融)":
             idx = event.selection.rows[0]
             st.session_state['target_stock'] = df_display.iloc[idx]['代號']
             st.session_state['previous_page'] = "🏆 台灣50 (排除金融)" 
+            st.session_state['current_page'] = "🔍 單一個股體檢"
+            st.rerun()
+
+# ----------------- 頁面 A2：AI概念股 -----------------
+elif mode == "🤖 AI概念股":
+    st.header("🤖 AI 概念股掃描雷達")
+    st.info("👇 點擊表格任一行，可進入深度體檢。涵蓋 AI 伺服器、散熱、CoWoS、ASIC 等核心 AI 供應鏈。")
+    if st.button("🚀 啟動掃描", type="primary", key="ai_concept_scan"):
+        results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        target_list = AI_CONCEPT_TICKERS
+        
+        for i, stock_id in enumerate(target_list):
+            stock_name = STOCK_DB.get(stock_id, {}).get("name", stock_id)
+            status_text.text(f"掃描中: {stock_name} ...")
+            # 掃描模式：不抓籌碼 (include_chips=False)
+            res_obj = analyze_stock(stock_id, start_date, include_chips=False)
+            if res_obj:
+                results.append({
+                    "代號": stock_id, "名稱": stock_name, "分數": int(res_obj.score),
+                    "收盤價": res_obj.fundamentals['Close'], "通過項目": res_obj.status_summary
+                })
+            progress_bar.progress((i + 1) / len(target_list))
+        progress_bar.empty()
+        status_text.empty()
+        if results:
+            st.session_state['scan_results_ai_concept'] = pd.DataFrame(results).sort_values(by="分數", ascending=False)
+            st.rerun()
+
+    ai_results = st.session_state.get('scan_results_ai_concept')
+    if ai_results is not None:
+        df_display = ai_results
+        event = st.dataframe(df_display, on_select="rerun", selection_mode="single-row",
+                             use_container_width=True, hide_index=True, height=500,
+                             key=f"ai_concept_df_{st.session_state['dataframe_key']}")
+        if len(event.selection.rows) > 0:
+            idx = event.selection.rows[0]
+            st.session_state['target_stock'] = df_display.iloc[idx]['代號']
+            st.session_state['previous_page'] = "🤖 AI概念股" 
             st.session_state['current_page'] = "🔍 單一個股體檢"
             st.rerun()
 
