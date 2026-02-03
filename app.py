@@ -44,7 +44,7 @@ except ImportError:
 
 # 顏色設定 (Antigravity 專業版：旗艦紅綠配色)
 COLOR_UP = '#FF4B4B'    # 鮮豔紅 (上漲)
-COLOR_DOWN = '#00C853'  # 活力綠 (下跌)
+COLOR_DOWN = '#00D964'  # 鮮豔綠 (下跌)
 
 # ==========================================
 # 1. 資料庫定義 (SSOT)
@@ -1876,42 +1876,19 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
         x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], 
         name='K線',
         increasing_line_color=COLOR_UP,
-        decreasing_line_color=COLOR_DOWN
+        increasing_fillcolor=COLOR_UP,
+        decreasing_line_color=COLOR_DOWN,
+        decreasing_fillcolor=COLOR_DOWN
     ), row=1, col=1)
+    
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA5'], line=dict(color='purple', width=1), name='MA5'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='blue', width=2), name='MA60 (防守)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['High_60'], line=dict(color='gray', dash='dash'), name='60日高 (壓力)'), row=1, col=1)
-
-    # 策略引擎買入訊號三角形標記（只標示最新一根，僅在 buy=True 時顯示）
-    if buy:
-        try:
-            x_buy = df_plot.index[-1]
-            y_buy = float(df_plot['Close'].iloc[-1])
-            marker_color = "#FF9800" if mode == "A" else "#FF1744"  # 橘色：抄底；紅色：強勢
-            marker_name = "買入點 (Mode A 抄底)" if mode == "A" else "買入點 (Mode B 強勢)"
-            fig.add_trace(
-                go.Scatter(
-                    x=[x_buy],
-                    y=[y_buy],
-                    mode="markers",
-                    name=marker_name,
-                    marker=dict(
-                        symbol="triangle-up",
-                        size=14,
-                        color=marker_color,
-                        line=dict(width=1, color="black"),
-                    ),
-                ),
-                row=1,
-                col=1,
-            )
-        except Exception:
-            pass
-
-    # --- Row 2: 成交量 ---
-    colors_vol = [COLOR_UP if r >= 1.3 else COLOR_DOWN for r in (df_plot['Volume'] / df_plot['Vol_MA20'])]
-    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], marker_color=colors_vol, name='成交量', opacity=0.3), row=2, col=1)
+    # --- Row 2: 成交量 (顏色跟隨當日漲跌，與 Yahoo Finance 一致) ---
+    price_change = df_plot['Close'] - df_plot['Close'].shift(1)
+    colors_vol = [COLOR_UP if c >= 0 else COLOR_DOWN for c in price_change]
+    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], marker_color=colors_vol, name='成交量'), row=2, col=1)
 
     # --- Row 3: 外資買賣超 ---
     if df_chips is not None and not df_chips.empty:
