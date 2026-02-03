@@ -2813,14 +2813,58 @@ elif mode == "📦 我持有的股票診斷":
 
         # Format display table for readability
         df_display = df_hold.copy()
-        for c in ['成本(含費)', '市值(扣費)', '未實現損益(元)']:
-            if c in df_display.columns:
-                df_display[c] = df_display[c].map(lambda x: f"{x:,.0f}")
         if '未實現損益(%)' in df_display.columns:
-            df_display['未實現損益(%)'] = df_display['未實現損益(%)'].map(lambda x: f"{x:.2f}%" if pd.notna(x) else '')
+            # 保持原始 float 讓 Styler 處理格式 (pct = pct / 100 ?) 
+            # 前面計算 pct 已經是 0~100 的 float，所以這裡保留原值，在 Styler 裡加 % 即可
+            # 但前面已經做了 map 轉字串，需要還原或調整順序
+            # 為了簡單起見，我們修改這裡不轉字串，留給 Styler format
+            pass
 
         st.subheader('目前持股列表')
-        st.dataframe(df_display.sort_values(by='未實現損益(%)', ascending=False), use_container_width=True)
+        
+        # 移除手動字串格式化，改用 Styler
+        # 定義樣式函數
+        def apply_table_style(df):
+            # 顏色設定
+            def color_profit(val):
+                if not isinstance(val, (int, float)): return ''
+                color = '#009900' if val > 0 else '#FF0000' if val < 0 else 'black'
+                return f'color: {color}; font-weight: bold;'
+            
+            # 建立 Styler
+            styler = df.style
+            
+            # 1. 數值格式 (千分位)
+            format_dict = {}
+            for col in ['買入價', '股數', '成本(含費)', '最新價', '市值(扣費)', '未實現損益(元)']:
+                if col in df.columns:
+                    format_dict[col] = "{:,.0f}"
+            if '未實現損益(%)' in df.columns:
+                 # 注意：這邊原始資料若是 float 則用 formatter，目前 pct 是 float
+                 # 但我們前面有手動算 pct，稍後會統一處理
+                 pass
+
+            styler = styler.format(format_dict)
+            
+            # 2. 顏色 (損益欄位)
+            subset_cols = [c for c in ['未實現損益(元)', '未實現損益(%)'] if c in df.columns]
+            styler = styler.applymap(color_profit, subset=subset_cols)
+            
+            # 3. 對齊 (標題置中，數值靠右)
+            # 標題置中 (CSS selector th)
+            styler = styler.set_table_styles([
+                {'selector': 'th', 'props': [('text-align', 'center'), ('vertical-align', 'middle')]},
+                {'selector': 'td', 'props': [('text-align', 'right')]}
+            ])
+            
+            return styler
+
+        if not df_display.empty:
+            # 確保欄位是數值型別以便 Styler 運作 (移除之前的字串化程式碼)
+            styled_df = apply_table_style(df_display)
+            st.dataframe(styled_df, use_container_width=True, height=len(df_display) * 35 + 38)
+        else:
+            st.info("尚無持股資料")
 
         # 選擇持股以編輯或賣出
         codes = [r['代號'] for r in rows]
