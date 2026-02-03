@@ -46,6 +46,25 @@ except ImportError:
 COLOR_UP = '#FF4B4B'    # 鮮豔紅 (上漲)
 COLOR_DOWN = '#00D964'  # 鮮豔綠 (下跌)
 
+# --- 全域 CSS 樣式 ---
+st.markdown("""
+    <style>
+    /* 強制所有 Dataframe 表頭 (TH) 置中 */
+    div.stDataFrame th {
+        text-align: center !important;
+        vertical-align: middle !important;
+    }
+    [data-testid="stHeaderRowCell"] {
+        text-align: center !important;
+        vertical-align: middle !important;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+    /* 強制內容置中或靠右 (由 Pandas Styler 輔助) */
+    </style>
+""", unsafe_allow_html=True)
+
 # ==========================================
 # 1. 資料庫定義 (SSOT)
 # ==========================================
@@ -304,6 +323,61 @@ def normalize_stock_id(code: str) -> str:
         return s.upper() + '.TW'
     except Exception:
         return code
+
+# --- 全域樣式函式 ---
+def apply_table_style(df):
+    """
+    統一對 DataFrame 套用樣式：
+    1. 標題置中
+    2. 數值靠右
+    3. 指定欄位千分位與小數點格式
+    4. 損益欄位顏色 (紅漲綠跌)
+    """
+    # 顏色設定
+    def color_profit(val):
+        if not isinstance(val, (int, float)): return ''
+        # 紅漲(正) 綠跌(負)
+        color = '#FF0000' if val > 0 else '#009900' if val < 0 else 'black'
+        return f'color: {color}; font-weight: bold;'
+    
+    # 建立 Styler
+    styler = df.style
+    
+    # 1. 數值格式 (千分位)
+    format_dict = {}
+    
+    # (A) 金額與股數：整數顯示
+    amount_cols = ['股數', '成本(含費)', '市值(扣費)', '未實現損益(元)', '已實現淨損益', '成交量', '量能']
+    for col in amount_cols:
+        if col in df.columns:
+            format_dict[col] = "{:,.0f}"
+
+    # (B) 股價：小數點後兩位
+    price_cols = ['買入價', '買入單價', '賣出單價', '最新價', '收盤價', '開盤價', '最高價', '最低價', 'MA5', 'MA10', 'MA20', 'MA60']
+    for col in price_cols:
+        if col in df.columns:
+            format_dict[col] = "{:,.2f}"
+    
+    # (C) 百分比格式
+    pct_cols = ['未實現損益(%)', '報酬率(%)', '漲跌幅']
+    for col in pct_cols:
+            if col in df.columns:
+                format_dict[col] = "{:.2f}%"
+
+    styler = styler.format(format_dict)
+    
+    # 2. 顏色 (損益欄位)
+    profit_cols = ['未實現損益(元)', '未實現損益(%)', '已實現淨損益', '報酬率(%)', '漲跌幅']
+    subset_cols = [c for c in profit_cols if c in df.columns]
+    styler = styler.applymap(color_profit, subset=subset_cols)
+    
+    # 3. 對齊 (標題置中，數值靠右)
+    styler = styler.set_table_styles([
+        {'selector': 'th', 'props': [('text-align', 'center'), ('vertical-align', 'middle')]},
+        {'selector': 'td', 'props': [('text-align', 'right')]}
+    ])
+    
+    return styler
 
 @st.cache_data(ttl=86400)
 def get_stock_display_name(code: str) -> str:
@@ -2105,7 +2179,7 @@ def render_chip_history_table(stock_id: str):
         return
     df_render = df_show[available_cols].reset_index(drop=True)
 
-    st.table(df_render)
+    st.dataframe(apply_table_style(df_render).hide(axis='index'), use_container_width=True)
 
 def go_back_logic():
     st.session_state['current_page'] = st.session_state['previous_page']
@@ -2202,8 +2276,8 @@ if mode == "🏆 台灣50 (排除金融)":
     tw50_results = st.session_state.get('scan_results_tw50')
     if tw50_results is not None:
         df_display = tw50_results
-        event = st.dataframe(df_display, on_select="rerun", selection_mode="single-row",
-                             use_container_width=True, hide_index=True, height=500,
+        event = st.dataframe(apply_table_style(df_display).hide(axis='index'), on_select="rerun", selection_mode="single-row",
+                             use_container_width=True, height=500,
                              key=f"tw50_df_{st.session_state['dataframe_key']}")
         if len(event.selection.rows) > 0:
             idx = event.selection.rows[0]
@@ -2264,8 +2338,8 @@ elif mode == "🤖 AI概念股":
     ai_results = st.session_state.get('scan_results_ai_concept')
     if ai_results is not None:
         df_display = ai_results
-        event = st.dataframe(df_display, on_select="rerun", selection_mode="single-row",
-                             use_container_width=True, hide_index=True, height=500,
+        event = st.dataframe(apply_table_style(df_display).hide(axis='index'), on_select="rerun", selection_mode="single-row",
+                             use_container_width=True, height=500,
                              key=f"ai_concept_df_{st.session_state['dataframe_key']}")
         if len(event.selection.rows) > 0:
             idx = event.selection.rows[0]
@@ -2441,8 +2515,8 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
     st.caption("條件完整、可執行交易的標的")
     if buy_results is not None and not buy_results.empty:
         df_buy_show = buy_results
-        event_buy = st.dataframe(df_buy_show, on_select="rerun", selection_mode="single-row",
-                                 use_container_width=True, hide_index=True,
+        event_buy = st.dataframe(apply_table_style(df_buy_show).hide(axis='index'), on_select="rerun", selection_mode="single-row",
+                                 use_container_width=True,
                                  key=f"sector_buy_{st.session_state['dataframe_key']}")
         if len(event_buy.selection.rows) > 0:
             idx = event_buy.selection.rows[0]
@@ -2471,8 +2545,8 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
     st.caption("值得盯，但尚未觸發買點的標的")
     if watch_results is not None and not watch_results.empty:
         df_watch_show = watch_results
-        event_watch = st.dataframe(df_watch_show, on_select="rerun", selection_mode="single-row",
-                                  use_container_width=True, hide_index=True,
+        event_watch = st.dataframe(apply_table_style(df_watch_show).hide(axis='index'), on_select="rerun", selection_mode="single-row",
+                                  use_container_width=True,
                                   key=f"sector_watch_{st.session_state['dataframe_key']}")
         if len(event_watch.selection.rows) > 0:
             idx = event_watch.selection.rows[0]
@@ -2591,8 +2665,8 @@ elif mode == "📈 MA5突破MA20掃描":
     if ma5_results is not None and not ma5_results.empty:
         st.subheader(f"✅ 符合條件清單 ({len(ma5_results)})")
         df_show = ma5_results.sort_values(by='收盤價', ascending=False)
-        event = st.dataframe(df_show, on_select="rerun", selection_mode="single-row",
-                            use_container_width=True, hide_index=True,
+        event = st.dataframe(apply_table_style(df_show).hide(axis='index'), on_select="rerun", selection_mode="single-row",
+                            use_container_width=True,
                             key=f"ma5_breakout_df_{st.session_state['dataframe_key']}")
         if len(event.selection.rows) > 0:
             idx = event.selection.rows[0]
@@ -2814,64 +2888,12 @@ elif mode == "📦 我持有的股票診斷":
         # Format display table for readability
         df_display = df_hold.copy()
         if '未實現損益(%)' in df_display.columns:
-            # 保持原始 float 讓 Styler 處理格式 (pct = pct / 100 ?) 
-            # 前面計算 pct 已經是 0~100 的 float，所以這裡保留原值，在 Styler 裡加 % 即可
-            # 但前面已經做了 map 轉字串，需要還原或調整順序
-            # 為了簡單起見，我們修改這裡不轉字串，留給 Styler format
             pass
-
-        # 定義共用樣式函數
-        def apply_table_style(df):
-            # 顏色設定
-            def color_profit(val):
-                if not isinstance(val, (int, float)): return ''
-                color = '#FF0000' if val > 0 else '#009900' if val < 0 else 'black'
-                return f'color: {color}; font-weight: bold;'
-            
-            # 建立 Styler
-            styler = df.style
-            
-            # 1. 數值格式 (千分位)
-            format_dict = {}
-            
-            # (A) 金額與股數：整數顯示
-            amount_cols = ['股數', '成本(含費)', '市值(扣費)', '未實現損益(元)', '已實現淨損益']
-            for col in amount_cols:
-                if col in df.columns:
-                    format_dict[col] = "{:,.0f}"
-
-            # (B) 股價：小數點後兩位
-            price_cols = ['買入價', '買入單價', '賣出單價', '最新價']
-            for col in price_cols:
-                if col in df.columns:
-                    format_dict[col] = "{:,.2f}"
-            
-            # (C) 百分比格式
-            pct_cols = ['未實現損益(%)', '報酬率(%)']
-            for col in pct_cols:
-                 if col in df.columns:
-                     format_dict[col] = "{:.2f}%"
-
-            styler = styler.format(format_dict)
-            
-            # 2. 顏色 (損益欄位)
-            # 正綠負紅
-            profit_cols = ['未實現損益(元)', '未實現損益(%)', '已實現淨損益', '報酬率(%)']
-            subset_cols = [c for c in profit_cols if c in df.columns]
-            styler = styler.applymap(color_profit, subset=subset_cols)
-            
-            # 3. 對齊 (標題置中，數值靠右)
-            styler = styler.set_table_styles([
-                {'selector': 'th', 'props': [('text-align', 'center'), ('vertical-align', 'middle')]},
-                {'selector': 'td', 'props': [('text-align', 'right')]}
-            ])
-            
-            return styler
 
         st.subheader('目前持股列表')
         if not df_display.empty:
             styled_df = apply_table_style(df_display)
-            st.dataframe(styled_df, use_container_width=True, height=len(df_display) * 35 + 38)
+            st.dataframe(styled_df.hide(axis='index'), use_container_width=True, height=len(df_display) * 35 + 38)
         else:
             st.info("尚無持股資料")
 
@@ -3070,7 +3092,7 @@ elif mode == "📦 我持有的股票診斷":
             
         # 套用樣式
         styled_hist = apply_table_style(df_hist.sort_values(by='賣出日期', ascending=False))
-        st.dataframe(styled_hist, use_container_width=True)
+        st.dataframe(styled_hist.hide(axis='index'), use_container_width=True)
 
         # 支援編輯歷史紀錄
         hist_codes = [f"{i} | {r.get('code')}" for i,r in enumerate(history)]
