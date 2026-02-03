@@ -2635,9 +2635,11 @@ elif mode == "📦 我持有的股票診斷":
                 if res_obj.chips_df is not None:
                     cs = detect_chip_switch(res_obj.chips_df)
                     if cs:
-                        if cs.get('kind') == 'sell_to_buy':
+                        # NOTE: detect_chip_switch 返回 tuple (kind, prev_val, last_val)，不是 dict
+                        kind = cs[0] if isinstance(cs, tuple) else cs.get('kind', '')
+                        if '賣轉買' in kind or kind == 'sell_to_buy':
                             chip_note = '外資轉買'
-                        elif cs.get('kind') == 'buy_to_sell':
+                        elif '買轉賣' in kind or kind == 'buy_to_sell':
                             chip_note = '外資轉賣'
                         if chip_note:
                             reasons.append(chip_note)
