@@ -2223,7 +2223,8 @@ elif mode == "🤖 AI概念股":
         target_list = AI_CONCEPT_TICKERS
         
         for i, stock_id in enumerate(target_list):
-            stock_name = STOCK_DB.get(stock_id, {}).get("name", stock_id)
+            # 動態取得股票名稱（優先 STOCK_DB → FinMind → yfinance）
+            stock_name = get_stock_display_name(stock_id)
             status_text.text(f"掃描中: {stock_name} ...")
             # 掃描模式：不抓籌碼 (include_chips=False)
             res_obj = analyze_stock(stock_id, start_date, include_chips=False)
