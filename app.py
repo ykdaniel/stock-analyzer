@@ -2226,15 +2226,36 @@ elif mode == "🤖 AI概念股":
             # 掃描模式：不抓籌碼 (include_chips=False)
             res_obj = analyze_stock(stock_id, start_date, include_chips=False)
             if res_obj:
+                # 短線買點偵測：價格突破 5 日線 + MA5 上穿 MA10
+                df = res_obj.tech_df
+                buy_signal = "❌"
+                if df is not None and len(df) >= 2:
+                    latest = df.iloc[-1]
+                    # 檢查是否有 Break_Price_MA5 和 MA5_Break_MA10 欄位
+                    if 'Break_Price_MA5' in df.columns and 'MA5_Break_MA10' in df.columns:
+                        # 檢查最近 3 天內是否有觸發買點訊號
+                        recent_days = df.tail(3)
+                        has_price_break = recent_days['Break_Price_MA5'].any()
+                        has_ma_cross = recent_days['MA5_Break_MA10'].any()
+                        if has_price_break and has_ma_cross:
+                            buy_signal = "🔥 買點"
+                        elif has_price_break or has_ma_cross:
+                            buy_signal = "⚡ 觀察"
+                
                 results.append({
                     "代號": stock_id, "名稱": stock_name, "分數": int(res_obj.score),
+                    "短線買點": buy_signal,
                     "收盤價": res_obj.fundamentals['Close'], "通過項目": res_obj.status_summary
                 })
             progress_bar.progress((i + 1) / len(target_list))
         progress_bar.empty()
         status_text.empty()
         if results:
-            st.session_state['scan_results_ai_concept'] = pd.DataFrame(results).sort_values(by="分數", ascending=False)
+            # 優先顯示有買點的股票
+            df_results = pd.DataFrame(results)
+            df_results['_sort_key'] = df_results['短線買點'].map({'🔥 買點': 0, '⚡ 觀察': 1, '❌': 2})
+            df_results = df_results.sort_values(by=['_sort_key', '分數'], ascending=[True, False]).drop(columns=['_sort_key'])
+            st.session_state['scan_results_ai_concept'] = df_results
             st.rerun()
 
     ai_results = st.session_state.get('scan_results_ai_concept')
