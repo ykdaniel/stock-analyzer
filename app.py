@@ -2964,11 +2964,56 @@ elif mode == "📦 我持有的股票診斷":
     if not history:
         st.info('歷史紀錄為空。')
     else:
-        df_hist = pd.DataFrame(history)
-        # human friendly columns
+        # 重算歷史損益 (含費用)
+        updated_history = []
+        FEE_RATE = 0.001425
+        TAX_RATE = 0.003
+        
+        for h in history:
+            b_p = float(h.get('buy_price', 0))
+            s_p = float(h.get('sell_price', 0))
+            q = int(h.get('qty', 0))
+            
+            raw_cost = b_p * q
+            raw_val = s_p * q
+            
+            # 費用
+            buy_fee = int(raw_cost * FEE_RATE)
+            sell_fee = int(raw_val * FEE_RATE)
+            sell_tax = int(raw_val * TAX_RATE)
+            
+            total_cost = raw_cost + buy_fee
+            net_income = raw_val - sell_fee - sell_tax
+            
+            net_profit = net_income - total_cost
+            net_pct = (net_profit / total_cost * 100) if total_cost != 0 else 0.0
+            
+            h_new = h.copy()
+            h_new['realized_profit'] = net_profit
+            h_new['realized_pct'] = net_pct
+            updated_history.append(h_new)
+
+        df_hist = pd.DataFrame(updated_history)
+        
+        # 欄位中文化與格式化
+        col_map = {
+            'code': '代號', 'name': '名稱', 
+            'buy_date': '買入日期', 'buy_price': '買入單價',
+            'sell_date': '賣出日期', 'sell_price': '賣出單價',
+            'qty': '股數', 
+            'realized_profit': '已實現淨損益', 'realized_pct': '報酬率(%)', 
+            'note': '備註'
+        }
+        
         if 'realized_profit' in df_hist.columns:
             df_hist = df_hist[['code','name','buy_date','buy_price','sell_date','sell_price','qty','realized_profit','realized_pct','note']]
-        st.dataframe(df_hist.sort_values(by='sell_date', ascending=False), use_container_width=True)
+            df_hist.rename(columns=col_map, inplace=True)
+            
+            # 格式化數字
+            df_hist['已實現淨損益'] = df_hist['已實現淨損益'].map(lambda x: f"{x:,.0f}")
+            df_hist['報酬率(%)'] = df_hist['報酬率(%)'].map(lambda x: f"{x:.2f}%")
+            
+        st.dataframe(df_hist.sort_values(by='賣出日期', ascending=False), use_container_width=True)
 
         # 支援編輯歷史紀錄
         hist_codes = [f"{i} | {r.get('code')}" for i,r in enumerate(history)]
