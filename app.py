@@ -86,6 +86,8 @@ STOCK_DB = {
     "3035.TW": {"name": "智原", "sector": SectorType.SEMI},
     "3661.TW": {"name": "世芯-KY", "sector": SectorType.SEMI},
     "6415.TW": {"name": "矽力-KY", "sector": SectorType.SEMI},
+    "3443.TW": {"name": "創意", "sector": SectorType.SEMI},
+    "6515.TW": {"name": "穎崴", "sector": SectorType.SEMI},
 
     # --- AI/電腦週邊 ---
     "2317.TW": {"name": "鴻海", "sector": SectorType.AI_PC},
