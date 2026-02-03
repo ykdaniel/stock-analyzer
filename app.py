@@ -938,8 +938,9 @@ def select_strategy_mode(df: pd.DataFrame, market_regime: str) -> Dict[str, Any]
     ma20_above_ma60 = ma20 >= ma60
     ma60_rising = ma60_slope > 0
     
-    # 檢查是否為低檔盤整（價格在 MA60 附近但未站穩）
-    is_low_consolidation = (close < ma60 * 1.1) and (close > ma60 * 0.9)
+    # 檢查是否為低檔盤整（價格在 MA60 下方但接近）
+    # NOTE: 只有當價格「未站穩」MA60 時才算低檔盤整，避免與 price_above_ma60 衝突
+    is_low_consolidation = (close < ma60) and (close > ma60 * 0.9)
     
     if price_above_ma20 and price_above_ma60 and ma20_above_ma60 and ma60_rising and not is_low_consolidation:
         return {
@@ -964,16 +965,11 @@ def select_strategy_mode(df: pd.DataFrame, market_regime: str) -> Dict[str, Any]
         }
     
     # 不符合任何結構
-    if market_regime == "NEUTRAL":
-        # NEUTRAL 市場只允許 Pullback 模式（避免假突破）
-        return {
-            "mode": "Pullback",
-            "reason": "盤整市場：僅允許回檔模式，避免假突破"
-        }
-    
+    # NOTE: 即使是 NEUTRAL 市場，若不符合 Mode A 條件，也應返回 NoTrade
+    # 避免將不符合結構的股票強制標記為 Pullback 模式
     return {
         "mode": "NoTrade",
-        "reason": "不符合 Mode A 或 Mode B 的結構條件"
+        "reason": "不符合 Mode A 或 Mode B 的結構條件" + ("（盤整市場）" if market_regime == "NEUTRAL" else "")
     }
 
 
@@ -1009,6 +1005,7 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
         }
     
     # Helper: 只取「昨天以前」的連續 n 日視窗，嚴格排除今天
+    # NOTE: 此處保留 local 定義以維持函數獨立性，未來可考慮提取至模組層級
     def prev_n_days(series: pd.Series, n: int) -> pd.Series:
         """回傳 series 中，緊鄰「昨天」往前數 n 天的資料視窗。"""
         if series is None or len(series) < n + 1:
@@ -1103,7 +1100,8 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
                 watch_reason_parts.append("Mode A 回檔型，結構完整，等待止跌訊號")
     
     # ===== Buy 判定：嚴格的事件觸發 =====
-    if watch:  # Buy 只能在 Watch 為 True 時觸發
+    # NOTE: 高檔乖離保護提前檢查，避免無效的 Buy 判斷計算
+    if watch and not is_overextended:  # Buy 只能在 Watch 為 True 且無高檔乖離時觸發
         if strategy_mode == "Trend":  # Mode B
             # Mode B Buy: 突破型 或 回測型（二選一）
             prev10_high = prev_n_days(df['High'], 10)
@@ -1158,17 +1156,15 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
                 buy = True
                 buy_reason_parts.append("Mode A 止跌觸發：價格 ≥ 前10日低點，出現止跌訊號，未破 MA60")
     
-    # ===== 高檔乖離保護：強制約束 =====
-    if is_overextended:
-        buy = False  # 高檔乖離時，Buy 強制為 False
-        if buy_reason_parts:
-            buy_reason_parts = []  # 清除之前的 Buy 理由
-            if watch:
-                watch_reason_parts.append("（高檔乖離 > 25%，僅可觀察，不可買進）")
+    # ===== 高檔乖離保護：補充 Watch 理由 =====
+    # NOTE: Buy 判斷已在上方提前過濾 is_overextended，此處僅補充 Watch 理由
+    if is_overextended and watch:
+        watch_reason_parts.append("（高檔乖離 > 25%，僅可觀察，不可買進）")
     
     # ===== 強制邏輯約束 =====
-    # 絕對不允許：Buy = True 但 Watch = False
+    # 絕對不允許：Buy = True 但 Watch = False（防禦性檢查）
     if buy and not watch:
+        logger.warning("邏輯錯誤偵測: Buy=True 但 Watch=False，已強制修正 (stock data length: %d)", len(df))
         buy = False
         buy_reason_parts = []
     
