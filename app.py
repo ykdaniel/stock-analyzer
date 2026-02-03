@@ -2825,7 +2825,7 @@ elif mode == "📦 我持有的股票診斷":
             # 顏色設定
             def color_profit(val):
                 if not isinstance(val, (int, float)): return ''
-                color = '#009900' if val > 0 else '#FF0000' if val < 0 else 'black'
+                color = '#FF0000' if val > 0 else '#009900' if val < 0 else 'black'
                 return f'color: {color}; font-weight: bold;'
             
             # 建立 Styler
@@ -3036,11 +3036,11 @@ elif mode == "📦 我持有的股票診斷":
             updated_history.append(h_new)
 
     # --- 顯示標題與總損益 ---
-    profit_color = "#009900" if total_realized_net > 0 else "#FF0000" if total_realized_net < 0 else "black"
+    profit_color = "#FF0000" if total_realized_net > 0 else "#009900" if total_realized_net < 0 else "black"
     profit_str = f"{total_realized_net:,.0f}"
     if total_realized_net > 0: profit_str = f"+{profit_str}"
     
-    st.markdown(f"### 📜 歷史成交紀錄 <span style='color:{profit_color}; font-size: 0.9em; margin-left: 10px'>(總已實現損益: {profit_str} 元)</span>", unsafe_allow_html=True)
+    st.markdown(f"### 📜 歷史成交紀錄 <span style='color:{profit_color}; font-size: 0.9em; margin-left: 10px'>(總損益: {profit_str} 元)</span>", unsafe_allow_html=True)
     
     # st.subheader('📜 歷史成交紀錄') # replaced
     
