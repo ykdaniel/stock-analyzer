@@ -2710,19 +2710,41 @@ elif mode == "📦 我持有的股票診斷":
             # qty 現在以「股」為單位
             qty = int(h.get('qty', 0))
             latest = get_latest_price(code) or 0.0
-            cost = buy_price * qty
-            value = latest * qty
-            unreal = value - cost
-            pct = (unreal / cost * 100) if cost != 0 else None
+            
+            # 成本與市值（未含費用）
+            raw_cost = buy_price * qty
+            raw_value = latest * qty
+
+            # 費用計算 (手續費 0.1425%, 交易稅 0.3%)
+            FEE_RATE = 0.001425
+            TAX_RATE = 0.003
+            
+            # 買入手續費 (無條件進入或四捨五入，這邊採標準算法)
+            buy_fee = int(raw_cost * FEE_RATE)
+            
+            # 賣出預估費用 (手續費 + 證交稅)
+            sell_fee = int(raw_value * FEE_RATE)
+            sell_tax = int(raw_value * TAX_RATE)
+            
+            # 修正後的總成本 (含買入手續費)
+            total_cost = raw_cost + buy_fee
+            
+            # 修正後的淨市值 (扣除賣出費用)
+            net_value = raw_value - sell_fee - sell_tax
+            
+            # 淨損益
+            unreal = net_value - total_cost
+            pct = (unreal / total_cost * 100) if total_cost != 0 else None
+            
             rows.append({
                 '代號': code,
                 '名稱': name,
                 '買入日': h.get('buy_date'),
                 '買入價': buy_price,
                 '股數': qty,
-                '成本(元)': cost,
+                '成本(含費)': total_cost,      # 更新欄位名稱
                 '最新價': latest,
-                '持有市值(元)': value,
+                '市值(扣費)': net_value,       # 更新欄位名稱
                 '未實現損益(元)': unreal,
                 '未實現損益(%)': pct,
                 '備註': h.get('note','')
@@ -2784,26 +2806,25 @@ elif mode == "📦 我持有的股票診斷":
         # display holdings table (recommendation shown separately)
         df_hold = pd.DataFrame(rows)
 
-        # --- Summary metrics ---
         try:
-            total_cost = float(df_hold['成本(元)'].sum())
-            total_value = float(df_hold['持有市值(元)'].sum())
+            total_cost = float(df_hold['成本(含費)'].sum())
+            total_value = float(df_hold['市值(扣費)'].sum())
             total_unreal = float(df_hold['未實現損益(元)'].sum())
             total_pct = (total_unreal / total_cost * 100) if total_cost != 0 else 0.0
         except Exception:
             total_cost = total_value = total_unreal = total_pct = 0.0
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric('總成本', f"{total_cost:,.0f} 元")
-        m2.metric('總市值', f"{total_value:,.0f} 元", delta=f"{total_unreal:,.0f} 元")
-        m3.metric('未實現損益', f"{total_unreal:,.0f} 元", delta=f"{total_pct:.2f}%")
+        m1.metric('總成本(含費)', f"{total_cost:,.0f} 元")
+        m2.metric('總市值(扣費)', f"{total_value:,.0f} 元", delta=f"{total_unreal:,.0f} 元")
+        m3.metric('未實現淨損益', f"{total_unreal:,.0f} 元", delta=f"{total_pct:.2f}%")
         m4.metric('持股筆數', f"{len(df_hold)}")
 
         st.markdown('---')
 
         # Format display table for readability
         df_display = df_hold.copy()
-        for c in ['成本(元)', '持有市值(元)', '未實現損益(元)']:
+        for c in ['成本(含費)', '市值(扣費)', '未實現損益(元)']:
             if c in df_display.columns:
                 df_display[c] = df_display[c].map(lambda x: f"{x:,.0f}")
         if '未實現損益(%)' in df_display.columns:
