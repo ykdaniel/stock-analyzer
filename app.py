@@ -2999,18 +2999,16 @@ elif mode == "📦 我持有的股票診斷":
                         st.success('已紀錄賣出，並移至歷史資料')
 
     st.markdown('---')
-
-    # --- 顯示歷史紀錄 ---
-    st.subheader('📜 歷史成交紀錄')
+    
+    # --- 計算歷史總損益 (含費用) ---
     history = st.session_state['history']
-    if not history:
-        st.info('歷史紀錄為空。')
-    else:
-        # 重算歷史損益 (含費用)
-        updated_history = []
-        FEE_RATE = 0.001425
-        TAX_RATE = 0.003
-        
+    total_realized_net = 0
+    updated_history = []
+    
+    FEE_RATE = 0.001425
+    TAX_RATE = 0.003
+    
+    if history:
         for h in history:
             b_p = float(h.get('buy_price', 0))
             s_p = float(h.get('sell_price', 0))
@@ -3030,11 +3028,26 @@ elif mode == "📦 我持有的股票診斷":
             net_profit = net_income - total_cost
             net_pct = (net_profit / total_cost * 100) if total_cost != 0 else 0.0
             
+            total_realized_net += net_profit
+            
             h_new = h.copy()
             h_new['realized_profit'] = net_profit
             h_new['realized_pct'] = net_pct
             updated_history.append(h_new)
 
+    # --- 顯示標題與總損益 ---
+    profit_color = "#009900" if total_realized_net > 0 else "#FF0000" if total_realized_net < 0 else "black"
+    profit_str = f"{total_realized_net:,.0f}"
+    if total_realized_net > 0: profit_str = f"+{profit_str}"
+    
+    st.markdown(f"### 📜 歷史成交紀錄 <span style='color:{profit_color}; font-size: 0.9em; margin-left: 10px'>(總已實現損益: {profit_str} 元)</span>", unsafe_allow_html=True)
+    
+    # st.subheader('📜 歷史成交紀錄') # replaced
+    
+    if not history:
+        st.info('歷史紀錄為空。')
+    else:
+        # 重算歷史損益 (已在上方計算完成，直接使用 updated_history)
         df_hist = pd.DataFrame(updated_history)
         
         # 欄位中文化與格式化
