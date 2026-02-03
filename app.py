@@ -2736,7 +2736,7 @@ elif mode == "📦 我持有的股票診斷":
                 buy_date = st.date_input('買入日期')
             with col2:
                 buy_price = st.number_input('買入價格 (每股)', min_value=0.0, format='%f')
-                qty = st.number_input('股數', min_value=1, step=1)
+                qty = st.number_input('股數', min_value=50, step=50, value=50)
             with col3:
                 note = st.text_input('備註 (選填)')
             submitted = st.form_submit_button('➕ 新增一筆持股')
@@ -2973,7 +2973,7 @@ elif mode == "📦 我持有的股票診斷":
                         e_buy_date = st.date_input('買入日期', value=pd.to_datetime(selected.get('buy_date')))
                         e_buy_price = st.number_input('買入價格', value=float(selected.get('buy_price')))
                     with e_col2:
-                        e_qty = st.number_input('股數', value=int(selected.get('qty')))
+                        e_qty = st.number_input('股數', value=int(selected.get('qty')), step=50, min_value=1)
                         e_note = st.text_input('備註', value=selected.get('note',''))
                     e_save = st.form_submit_button('更新持股')
                     if e_save:
@@ -2988,7 +2988,7 @@ elif mode == "📦 我持有的股票診斷":
                         sell_date = st.date_input('賣出日期')
                         sell_price = st.number_input('賣出價格', min_value=0.0, format='%f')
                     with s_col2:
-                        sell_qty = st.number_input('股數 (預設為持有股數)', value=int(selected.get('qty')))
+                        sell_qty = st.number_input('股數 (預設為持有股數)', value=int(selected.get('qty')), step=50, min_value=1)
                         sell_note = st.text_input('備註 (選填)')
                     s_submit = st.form_submit_button('確認賣出並移至歷史')
                     if s_submit:
