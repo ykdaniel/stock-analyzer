@@ -62,6 +62,15 @@ st.markdown("""
         align-items: center;
     }
     /* 強制內容置中或靠右 (由 Pandas Styler 輔助) */
+    
+    /* 輸入框底色改為淺灰色 */
+    div[data-baseweb="input"], div[data-baseweb="select"], div[data-baseweb="base-input"] {
+        background-color: #f0f2f6 !important;
+        border-radius: 4px;
+    }
+    .stTextInput input, .stNumberInput input, .stDateInput input {
+        background-color: transparent !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -2973,7 +2982,7 @@ elif mode == "📦 我持有的股票診斷":
                         e_buy_date = st.date_input('買入日期', value=pd.to_datetime(selected.get('buy_date')))
                         e_buy_price = st.number_input('買入價格', value=float(selected.get('buy_price')))
                     with e_col2:
-                        e_qty = st.number_input('股數', value=int(selected.get('qty')), step=50, min_value=1)
+                        e_qty = st.number_input('股數', value=int(selected.get('qty')), step=50, min_value=50)
                         e_note = st.text_input('備註', value=selected.get('note',''))
                     e_save = st.form_submit_button('更新持股')
                     if e_save:
@@ -2988,7 +2997,7 @@ elif mode == "📦 我持有的股票診斷":
                         sell_date = st.date_input('賣出日期')
                         sell_price = st.number_input('賣出價格', min_value=0.0, format='%f')
                     with s_col2:
-                        sell_qty = st.number_input('股數 (預設為持有股數)', value=int(selected.get('qty')), step=50, min_value=1)
+                        sell_qty = st.number_input('股數 (預設為持有股數)', value=int(selected.get('qty')), step=50, min_value=50)
                         sell_note = st.text_input('備註 (選填)')
                     s_submit = st.form_submit_button('確認賣出並移至歷史')
                     if s_submit:
