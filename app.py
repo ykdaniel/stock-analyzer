@@ -2840,9 +2840,7 @@ elif mode == "📦 我持有的股票診斷":
                 if col in df.columns:
                     format_dict[col] = "{:,.0f}"
             if '未實現損益(%)' in df.columns:
-                 # 注意：這邊原始資料若是 float 則用 formatter，目前 pct 是 float
-                 # 但我們前面有手動算 pct，稍後會統一處理
-                 pass
+                 format_dict['未實現損益(%)'] = "{:.2f}%"
 
             styler = styler.format(format_dict)
             
