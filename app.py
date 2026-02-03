@@ -2820,10 +2820,7 @@ elif mode == "📦 我持有的股票診斷":
             # 為了簡單起見，我們修改這裡不轉字串，留給 Styler format
             pass
 
-        st.subheader('目前持股列表')
-        
-        # 移除手動字串格式化，改用 Styler
-        # 定義樣式函數
+        # 定義共用樣式函數
         def apply_table_style(df):
             # 顏色設定
             def color_profit(val):
@@ -2836,20 +2833,27 @@ elif mode == "📦 我持有的股票診斷":
             
             # 1. 數值格式 (千分位)
             format_dict = {}
-            for col in ['買入價', '股數', '成本(含費)', '最新價', '市值(扣費)', '未實現損益(元)']:
+            # 持股列表欄位 + 歷史紀錄欄位
+            numeric_cols = ['買入價', '買入單價', '賣出單價', '股數', '成本(含費)', '最新價', '市值(扣費)', '未實現損益(元)', '已實現淨損益']
+            for col in numeric_cols:
                 if col in df.columns:
                     format_dict[col] = "{:,.0f}"
-            if '未實現損益(%)' in df.columns:
-                 format_dict['未實現損益(%)'] = "{:.2f}%"
+            
+            # 百分比格式
+            pct_cols = ['未實現損益(%)', '報酬率(%)']
+            for col in pct_cols:
+                 if col in df.columns:
+                     format_dict[col] = "{:.2f}%"
 
             styler = styler.format(format_dict)
             
             # 2. 顏色 (損益欄位)
-            subset_cols = [c for c in ['未實現損益(元)', '未實現損益(%)'] if c in df.columns]
+            # 正綠負紅
+            profit_cols = ['未實現損益(元)', '未實現損益(%)', '已實現淨損益', '報酬率(%)']
+            subset_cols = [c for c in profit_cols if c in df.columns]
             styler = styler.applymap(color_profit, subset=subset_cols)
             
             # 3. 對齊 (標題置中，數值靠右)
-            # 標題置中 (CSS selector th)
             styler = styler.set_table_styles([
                 {'selector': 'th', 'props': [('text-align', 'center'), ('vertical-align', 'middle')]},
                 {'selector': 'td', 'props': [('text-align', 'right')]}
@@ -2857,8 +2861,8 @@ elif mode == "📦 我持有的股票診斷":
             
             return styler
 
+        st.subheader('目前持股列表')
         if not df_display.empty:
-            # 確保欄位是數值型別以便 Styler 運作 (移除之前的字串化程式碼)
             styled_df = apply_table_style(df_display)
             st.dataframe(styled_df, use_container_width=True, height=len(df_display) * 35 + 38)
         else:
@@ -3040,11 +3044,13 @@ elif mode == "📦 我持有的股票診斷":
             df_hist = df_hist[['code','name','buy_date','buy_price','sell_date','sell_price','qty','realized_profit','realized_pct','note']]
             df_hist.rename(columns=col_map, inplace=True)
             
-            # 格式化數字
-            df_hist['已實現淨損益'] = df_hist['已實現淨損益'].map(lambda x: f"{x:,.0f}")
-            df_hist['報酬率(%)'] = df_hist['報酬率(%)'].map(lambda x: f"{x:.2f}%")
+            # 格式化數字與美化 (改用 Styler)
+            # 移除手動 map，保留數值給 apply_table_style
+            pass
             
-        st.dataframe(df_hist.sort_values(by='賣出日期', ascending=False), use_container_width=True)
+        # 套用樣式
+        styled_hist = apply_table_style(df_hist.sort_values(by='賣出日期', ascending=False))
+        st.dataframe(styled_hist, use_container_width=True)
 
         # 支援編輯歷史紀錄
         hist_codes = [f"{i} | {r.get('code')}" for i,r in enumerate(history)]
