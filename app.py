@@ -2665,35 +2665,24 @@ elif mode == "📦 我持有的股票診斷":
                 qty = st.number_input('股數', min_value=1, step=1)
             with col3:
                 note = st.text_input('備註 (選填)')
-            submitted = st.form_submit_button('新增 / 更新持股')
+            submitted = st.form_submit_button('➕ 新增一筆持股')
+            st.caption("💡 提示：輸入相同代號會視為新的一筆買入（分批進場）。若要修改舊庫存，請使用下方表格的『編輯』功能。")
+            
             if submitted:
                 if not code_in:
                     st.error('請輸入代號')
                 else:
                     code_norm = normalize_stock_id(code_in)
-                    # Check if exists -> update
-                    exists = False
-                    for h in st.session_state['holdings']:
-                        if h.get('code') == code_norm:
-                            h.update({
-                                'code': code_norm,
-                                'buy_date': buy_date.strftime('%Y-%m-%d'),
-                                'buy_price': float(buy_price),
-                                'qty': int(qty),
-                                'note': note
-                            })
-                            exists = True
-                            break
-                    if not exists:
-                        st.session_state['holdings'].append({
-                            'code': code_norm,
-                            'buy_date': buy_date.strftime('%Y-%m-%d'),
-                            'buy_price': float(buy_price),
-                            'qty': int(qty),
-                            'note': note
-                        })
+                    # 支援分批買進：直接 Append，不覆蓋舊資料
+                    st.session_state['holdings'].append({
+                        'code': code_norm,
+                        'buy_date': buy_date.strftime('%Y-%m-%d'),
+                        'buy_price': float(buy_price),
+                        'qty': int(qty),
+                        'note': note
+                    })
                     save_json(HOLDINGS_FILE, st.session_state['holdings'])
-                    st.success('持股已儲存')
+                    st.success('已新增一筆持股紀錄')
 
     st.markdown('---')
 
