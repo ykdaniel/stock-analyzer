@@ -1794,13 +1794,13 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
 
     # 價格分級表 (適配深色模式)
     row1_style = "background-color: #1B5E20; color: #FAFAFA;" if action_type == "積極攻擊" else ""
-    row2_style = "background-color: #0D47A1; color: #FAFAFA;" if action_type == "防守等待" else ""
+    row2_style = "background-color: #E65100; color: #FAFAFA;" if action_type == "防守等待" else ""
     
     st.markdown(f"""
     <style> .stTable td {{ vertical-align: middle; }} </style>
-    <table style="width:100%; text-align: left; border-collapse: collapse; color: #FAFAFA;">
+    <table style="width:100%; text-align: left; border-collapse: collapse;">
         <thead>
-            <tr style="border-bottom: 2px solid #444; background-color: #262730;">
+            <tr style="border-bottom: 2px solid #444; background-color: #262730; color: #FAFAFA;">
                 <th style="padding: 8px;">角色</th>
                 <th style="padding: 8px;">價格 (約)</th>
                 <th style="padding: 8px;">策略意義</th>
@@ -1865,8 +1865,8 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
         rows=4, cols=1, 
         shared_xaxes=True, 
         row_heights=[0.36, 0.18, 0.22, 0.24],
-        # 再加大子圖垂直間距，讓區塊更分明
-        vertical_spacing=0.08,
+        # 加大子圖垂直間距，讓區塊更分明
+        vertical_spacing=0.06,
         subplot_titles=("K線與關鍵位", "成交量", "外資買賣超(張)", "MACD 指標"),
         specs=[[{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}]]
     )
@@ -1952,30 +1952,14 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DIF'], line=dict(color='#2962FF', width=1), name='DIF (快)'), row=4, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DEA'], line=dict(color='#FF6D00', width=1), name='DEA (慢)'), row=4, col=1)
 
-    # 子圖之間加上明顯的水平分隔線（以 paper 座標畫在不同 y 比例上）
-    sep_shapes = [
-        dict(
-            type="line",
-            xref="paper",
-            yref="paper",
-            x0=0.0,
-            x1=1.0,
-            y0=y,
-            line=dict(color="#444444", width=2, dash="dot"),
-        )
-        for y in (0.29, 0.56, 0.83)
-    ]
-
     fig.update_layout(
         height=1100,
         xaxis_rangeslider_visible=False,
         title_text=f"{stock_id} 綜合分析圖",
         hovermode='x unified',
-        shapes=sep_shapes,
-        template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
     )
+    
+    # 移除邊框設定，保持圖表乾淨
     
     # 設定 Y 軸標題
     fig.update_yaxes(title_text="成交量", row=2, col=1)
