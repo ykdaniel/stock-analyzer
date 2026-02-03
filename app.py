@@ -2510,8 +2510,7 @@ elif mode == "📦 我持有的股票診斷":
     st.header("📦 我持有的股票診斷 (持股管理)")
     st.markdown("管理你的持股：新增、編輯、賣出並保存為歷史紀錄。資料會儲存在專案目錄下的 `holdings.json` 與 `history.json`。")
 
-    # --- 檔案存放路徑 ---
-    DATA_DIR = os.path.abspath(os.path.dirname(__file__))
+    # --- 檔案存放路徑 (使用模組層級已定義的 DATA_DIR，見第 325 行) ---
     HOLDINGS_FILE = os.path.join(DATA_DIR, 'holdings.json')
     HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
 
