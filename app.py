@@ -2313,14 +2313,66 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
         st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
         all_sectors = SectorProvider.get_sectors()
         
+        # 定義需要特殊標示的電子科技類股（橘色底）
+        TECH_SECTORS = ["光電業", "半導體業", "電子工業", "電腦及週邊設備業"]
+        
         # 建立類股按鈕網格
         if not all_sectors:
             st.error("無法取得類股資料，請檢查 FinMind 連線。")
         else:
+            # 橘色按鈕樣式 CSS
+            st.markdown("""
+            <style>
+            .orange-btn > button {
+                background-color: #FF9800 !important;
+                color: white !important;
+                border: none !important;
+            }
+            .orange-btn > button:hover {
+                background-color: #F57C00 !important;
+                color: white !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # ===== 電子科技綜合掃描按鈕 =====
+            st.markdown("#### 🔥 快速掃描")
+            if st.button("⚡ 電子科技綜合掃描（光電/半導體/電子/電腦週邊）", type="primary", use_container_width=True, key="tech_combo_scan"):
+                with st.spinner("正在抓取【電子科技綜合】成分股..."):
+                    combined_stocks = {}
+                    for sec in TECH_SECTORS:
+                        sec_info = SectorProvider.get_sector_stocks_info(sec)
+                        combined_stocks.update(sec_info)
+                    
+                    stock_info_map = combined_stocks
+                    target_stocks = list(stock_info_map.keys())
+                    
+                    st.session_state['last_scanned_sector'] = "電子科技綜合"
+                    if target_stocks:
+                        st.success(f"已取得 {len(target_stocks)} 檔成分股（來自 {len(TECH_SECTORS)} 個類股）")
+                        scan_triggered = True
+                        batch_mode = True
+                    else:
+                        st.warning("無法取得成分股，請檢查網路連線。")
+            
+            st.markdown("#### 📂 單一類股掃描")
             # 每行 6 個按鈕
             cols = st.columns(6)
             for i, sec in enumerate(all_sectors):
-                if cols[i % 6].button(sec, use_container_width=True):
+                # 判斷是否為電子科技類股，若是則套用橘色樣式
+                is_tech = sec in TECH_SECTORS
+                col = cols[i % 6]
+                
+                if is_tech:
+                    # 使用 container 包裝以套用 CSS class
+                    with col:
+                        st.markdown('<div class="orange-btn">', unsafe_allow_html=True)
+                        clicked = st.button(f"🔶 {sec}", use_container_width=True, key=f"sector_{sec}")
+                        st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    clicked = col.button(sec, use_container_width=True, key=f"sector_{sec}")
+                
+                if clicked:
                     with st.spinner(f"正在抓取【{sec}】成分股..."):
                         # 改用詳細資訊 (含名稱)
                         stock_info_map = SectorProvider.get_sector_stocks_info(sec)
