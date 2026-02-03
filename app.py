@@ -1885,10 +1885,11 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='blue', width=2), name='MA60 (防守)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['High_60'], line=dict(color='gray', dash='dash'), name='60日高 (壓力)'), row=1, col=1)
-    # --- Row 2: 成交量 (顏色跟隨當日漲跌，與 Yahoo Finance 一致) ---
+    # --- Row 2: 成交量 (顏色跟隨當日漲跌，單位改為「張」) ---
     price_change = df_plot['Close'] - df_plot['Close'].shift(1)
     colors_vol = [COLOR_UP if c >= 0 else COLOR_DOWN for c in price_change]
-    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], marker_color=colors_vol, name='成交量'), row=2, col=1)
+    volume_in_lots = df_plot['Volume'] / 1000  # 股數轉張數
+    fig.add_trace(go.Bar(x=df_plot.index, y=volume_in_lots, marker_color=colors_vol, name='成交量(張)'), row=2, col=1)
 
     # --- Row 3: 外資買賣超 ---
     if df_chips is not None and not df_chips.empty:
@@ -1939,7 +1940,7 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     # 移除邊框設定，保持圖表乾淨
     
     # 設定 Y 軸標題
-    fig.update_yaxes(title_text="成交量", row=2, col=1)
+    fig.update_yaxes(title_text="成交量(張)", row=2, col=1)
     fig.update_yaxes(title_text="外資買賣超", row=3, col=1)
     fig.update_yaxes(title_text="MACD", row=4, col=1)
 
