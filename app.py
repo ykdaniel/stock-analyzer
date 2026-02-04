@@ -3292,7 +3292,7 @@ elif mode == "📦 我持有的股票診斷":
                 buy_date = st.date_input('買入日期')
             with col2:
                 buy_price = st.number_input('買入價格 (每股)', min_value=0.0, format='%f')
-                qty = st.number_input('股數', min_value=50, step=50, value=50)
+                qty = st.number_input('股數', min_value=1, step=10, value=1000)
             with col3:
                 note = st.text_input('備註 (選填)')
             submitted = st.form_submit_button('➕ 新增一筆持股')
@@ -3326,43 +3326,15 @@ elif mode == "📦 我持有的股票診斷":
             code = h.get('code')
             name = get_stock_display_name(code)
             buy_price = float(h.get('buy_price', 0.0))
-            # qty 現在以「股」為單位
             qty = int(h.get('qty', 0))
             latest = get_latest_price(code) or 0.0
             
-            # 成本與市值（未含費用）
-            raw_cost = buy_price * qty
-            raw_value = latest * qty
-
-            # 費用計算常數
-            FEE_RATE = 0.001425      # 手續費 0.1425%
-            TAX_RATE_STOCK = 0.003   # 一般股票證交稅 0.3%
-            TAX_RATE_ETF = 0.001     # ETF 證交稅 0.1%
-            MIN_FEE = 20             # 最低手續費 20 元
-            
-            # 判斷是否為 ETF（代號以 00 開頭且為 4-6 碼數字）
-            code_num = code.replace('.TW', '').replace('.TWO', '')
-            is_etf = code_num.startswith('00') and len(code_num) <= 6
-            tax_rate = TAX_RATE_ETF if is_etf else TAX_RATE_STOCK
-            
-            # 買入手續費 (無條件進位，最低 20 元)
-            buy_fee_raw = raw_cost * FEE_RATE
-            buy_fee = max(MIN_FEE, math.ceil(buy_fee_raw)) if buy_fee_raw > 0 else 0
-            
-            # 賣出預估費用 (手續費 + 證交稅)
-            sell_fee_raw = raw_value * FEE_RATE
-            sell_fee = max(MIN_FEE, math.ceil(sell_fee_raw)) if sell_fee_raw > 0 else 0
-            sell_tax = math.ceil(raw_value * tax_rate)
-            
-            # 修正後的總成本 (含買入手續費)
-            total_cost = raw_cost + buy_fee
-            
-            # 修正後的淨市值 (扣除賣出費用)
-            net_value = raw_value - sell_fee - sell_tax
-            
-            # 淨損益
-            unreal = net_value - total_cost
-            pct = (unreal / total_cost * 100) if total_cost != 0 else None
+            # 使用統一函式計算
+            log = calculate_tradelog(code, buy_price, latest, qty, fee_discount=fee_discount_input)
+            total_cost = log['total_cost']
+            net_value = log['net_value']
+            unreal = log['unrealized_profit']
+            pct = log['profit_pct']
             
             rows.append({
                 '代號': code,
@@ -3370,9 +3342,9 @@ elif mode == "📦 我持有的股票診斷":
                 '買入日': h.get('buy_date'),
                 '買入價': buy_price,
                 '股數': qty,
-                '成本(含費)': total_cost,      # 更新欄位名稱
+                '成本(含費)': total_cost,
                 '最新價': latest,
-                '市值(扣費)': net_value,       # 更新欄位名稱
+                '市值(扣費)': net_value,
                 '未實現損益(元)': unreal,
                 '未實現損益(%)': pct,
                 '備註': h.get('note','')
@@ -3495,12 +3467,14 @@ elif mode == "📦 我持有的股票診斷":
                             # brief holding summary
                             try:
                                 buy_p = float(selected.get('buy_price'))
-                                qty_p = int(selected.get('qty'))  # 股數
+                                qty_p = int(selected.get('qty'))
                                 latest_p = get_latest_price(selected.get('code')) or 0.0
-                                cost_p = buy_p * qty_p
-                                value_p = latest_p * qty_p
-                                unreal_p = value_p - cost_p
-                                pct_p = (unreal_p / cost_p * 100) if cost_p != 0 else 0
+                                
+                                # 使用統一函式計算
+                                log_p = calculate_tradelog(selected.get('code'), buy_p, latest_p, qty_p, fee_discount=fee_discount_input)
+                                unreal_p = log_p['unrealized_profit']
+                                pct_p = log_p['profit_pct']
+                                
                                 st.markdown(f"**持股小結：** {selected.get('code')}  {get_stock_display_name(selected.get('code'))}  ")
                                 st.markdown(f"買入價：{buy_p:.2f}，股數：{qty_p}，最新價：{latest_p:.2f}  ")
                                 st.markdown(f"未實現：{unreal_p:,.0f} 元 ({pct_p:.2f}%)")
@@ -3538,7 +3512,7 @@ elif mode == "📦 我持有的股票診斷":
                         e_buy_date = st.date_input('買入日期', value=pd.to_datetime(selected.get('buy_date')))
                         e_buy_price = st.number_input('買入價格', value=float(selected.get('buy_price')))
                     with e_col2:
-                        e_qty = st.number_input('股數', value=int(selected.get('qty')), step=50, min_value=50)
+                        e_qty = st.number_input('股數', value=int(selected.get('qty')), step=1, min_value=1)
                         e_note = st.text_input('備註', value=selected.get('note',''))
                     e_save = st.form_submit_button('更新持股')
                     if e_save:
@@ -3600,62 +3574,38 @@ elif mode == "📦 我持有的股票診斷":
             b_p = float(h.get('buy_price', 0))
             s_p = float(h.get('sell_price', 0))
             q = int(h.get('qty', 0))
+            code = h.get('code', '')
             
-            raw_cost = b_p * q
-            raw_val = s_p * q
+            # 使用統一函式計算歷史損益
+            log = calculate_tradelog(code, b_p, s_p, q, fee_discount=fee_discount_input)
+            realized_net = log['unrealized_profit']
+            total_realized_net += realized_net
             
-            # 費用
-            buy_fee = int(raw_cost * FEE_RATE)
-            sell_fee = int(raw_val * FEE_RATE)
-            sell_tax = int(raw_val * TAX_RATE)
+            updated_history.append({
+                '股票代號': code,
+                '股票名稱': h.get('name',''),
+                '買入日期': h.get('buy_date'),
+                '賣出日期': h.get('sell_date'),
+                '買入單價': b_p,
+                '賣出單價': s_p,
+                '股數': q,
+                '已實現淨損益': realized_net,
+                '報酬率(%)': log['profit_pct'],
+                '備註': h.get('note','')
+            })
             
-            total_cost = raw_cost + buy_fee
-            net_income = raw_val - sell_fee - sell_tax
-            
-            net_profit = net_income - total_cost
-            net_pct = (net_profit / total_cost * 100) if total_cost != 0 else 0.0
-            
-            total_realized_net += net_profit
-            
-            h_new = h.copy()
-            h_new['realized_profit'] = net_profit
-            h_new['realized_pct'] = net_pct
-            updated_history.append(h_new)
-
     # --- 顯示標題與總損益 ---
-    profit_color = "#FF0000" if total_realized_net > 0 else "#009900" if total_realized_net < 0 else "black"
+    profit_color = "#FF4B4B" if total_realized_net > 0 else "#00D964" if total_realized_net < 0 else "gray"
     profit_str = f"{total_realized_net:,.0f}"
     if total_realized_net > 0: profit_str = f"+{profit_str}"
     
-    st.markdown(f"### 📜 歷史成交紀錄 <span style='color:{profit_color}; font-size: 0.9em; margin-left: 10px'>(總損益: {profit_str} 元)</span>", unsafe_allow_html=True)
-    
-    # st.subheader('📜 歷史成交紀錄') # replaced
+    st.markdown(f"### 📜 歷史成交紀錄 <span style='color:{profit_color}; font-size: 0.9em; margin-left: 10px'>(累計已實現損益: {profit_str} 元)</span>", unsafe_allow_html=True)
     
     if not history:
-        st.info('歷史紀錄為空。')
+        st.info('目前尚無歷史成交紀錄。')
     else:
-        # 重算歷史損益 (已在上方計算完成，直接使用 updated_history)
         df_hist = pd.DataFrame(updated_history)
-        
-        # 欄位中文化與格式化
-        col_map = {
-            'code': '代號', 'name': '名稱', 
-            'buy_date': '買入日期', 'buy_price': '買入單價',
-            'sell_date': '賣出日期', 'sell_price': '賣出單價',
-            'qty': '股數', 
-            'realized_profit': '已實現淨損益', 'realized_pct': '報酬率(%)', 
-            'note': '備註'
-        }
-        
-        if 'realized_profit' in df_hist.columns:
-            df_hist = df_hist[['code','name','buy_date','buy_price','sell_date','sell_price','qty','realized_profit','realized_pct','note']]
-            df_hist.rename(columns=col_map, inplace=True)
-            
-            # 格式化數字與美化 (改用 Styler)
-            # 移除手動 map，保留數值給 apply_table_style
-            pass
-            
-        # 套用樣式
+        # 直接套用樣式（apply_table_style 會處理數值格式與顏色）
         styled_hist = apply_table_style(df_hist.sort_values(by='賣出日期', ascending=False))
         st.dataframe(styled_hist.hide(axis='index'), use_container_width=True)
 
