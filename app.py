@@ -312,6 +312,51 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- 損益計算工具 ---
+def calculate_tradelog(code, buy_price, current_price, qty, fee_discount=0.6):
+    """
+    計算交易損益與費用（統一邏輯）
+    :param fee_discount: 手續費折扣 (例如 0.6 代表 6 折)
+    """
+    raw_cost = buy_price * qty
+    raw_value = current_price * qty
+    
+    # 常數設定
+    FEE_RATE = 0.001425
+    TAX_RATE_STOCK = 0.003
+    TAX_RATE_ETF = 0.001
+    MIN_FEE = 20
+    
+    # 判斷是否為 ETF
+    # code 可能帶有 .TW 或 .TWO
+    code_num = str(code).upper().replace('.TW', '').replace('.TWO', '')
+    is_etf = code_num.startswith('00') and len(code_num) <= 6
+    tax_rate = TAX_RATE_ETF if is_etf else TAX_RATE_STOCK
+    
+    # 買入手續費 (無條件進位，最低 20 元)
+    buy_fee_raw = raw_cost * FEE_RATE * fee_discount
+    buy_fee = max(MIN_FEE, math.ceil(buy_fee_raw)) if buy_fee_raw > 0 else 0
+    total_cost = raw_cost + buy_fee
+    
+    # 賣出預估費用 (手續費 + 證交稅)
+    sell_fee_raw = raw_value * FEE_RATE * fee_discount
+    sell_fee = max(MIN_FEE, math.ceil(sell_fee_raw)) if sell_fee_raw > 0 else 0
+    sell_tax = math.ceil(raw_value * tax_rate)
+    
+    net_value = raw_value - sell_fee - sell_tax
+    unrealized_profit = net_value - total_cost
+    profit_pct = (unrealized_profit / total_cost * 100) if total_cost != 0 else 0.0
+    
+    return {
+        'total_cost': total_cost,
+        'net_value': net_value,
+        'unrealized_profit': unrealized_profit,
+        'profit_pct': profit_pct,
+        'buy_fee': buy_fee,
+        'sell_fee': sell_fee,
+        'sell_tax': sell_tax
+    }
+
 # ==========================================
 # 1. 資料庫定義 (SSOT)
 # ==========================================
