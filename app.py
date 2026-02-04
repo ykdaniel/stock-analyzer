@@ -2349,100 +2349,36 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     
     st.markdown("---")
 
-    # 6. 進出場時機 (KDJ)
-    st.subheader("6️⃣ 進出場時機 (KDJ)")
-
-    # 準備變數
-    k_curr, k_prev = curr['K'], prev['K']
-    d_curr, d_prev = curr['D'], prev['D']
-    j_curr, j_prev = curr['J'], prev['J']
+    # 6. 進出場時機 (KDJ) 與 AI 綜合總結
+    st.subheader("6️⃣ 進出場時機 (KDJ) 與 AI 綜合總結")
     
-    # 1. 必要條件（略微放寬：D 低檔 + K 在 D 之上 + 不再破底）
-    cond_d_low = d_curr <= 40  # 允許 D 在 40 以內（含低檔鈍化後續漲）
-    cond_k_above_d = k_curr >= d_curr  # 不一定當天黃金交叉，只要 K 在 D 之上
-    # 最近 3 根 K 棒收盤價未破低 (比較 Close 與近 3 日最低 Low) 或 簡單採收盤價不破前低
-    # 這裡採用: 目前收盤價 >= 近 5 日最低收盤價 (代表沒有持續創新低)
-    recent_low_close = df['Close'].iloc[-5:].min()
-    cond_no_new_low = curr['Close'] >= recent_low_close
-
-    nec_pass = cond_d_low and cond_k_above_d and cond_no_new_low
-    
-    # 2. 趨勢過濾 (至少 1 項) — 這裡只做「是否偏多」的基礎過濾
-    tf_a = curr['Close'] >= curr['MA20']      # 收盤價站上月線
-    # tf_c 回測不破 (簡化為 Low >= MA20)
-    tf_c = curr['Low'] >= curr['MA20']
-    trend_filter_pass = tf_a or tf_c
-    
-    # 3. 加分條件 (4 選 2)
-    bonus_score = 0
-    # (1) J 值超賣
-    b1 = j_curr < 20
-    # (2) 量能不縮：成交量至少不低於 5 日均量的 0.8 倍
-    vol_ma5 = curr.get('Vol_MA5', 0)
-    b2 = vol_ma5 > 0 and (curr['Volume'] >= vol_ma5 * 0.8)
-    # (3) KD 同步上彎
-    k_slope = k_curr - k_prev
-    d_slope = d_curr - d_prev
-    b3 = (k_slope > 0) and (d_slope > 0)
-    # (4) 均線多頭結構作為加分（MA20 > MA60）
-    tf_b = curr['MA20'] >= curr['MA60']
-    b4 = tf_b
-    
-    for flag in (b1, b2, b3, b4):
-        if flag:
-            bonus_score += 1
-    
-    bonus_pass = bonus_score >= 2
-    
-    # 最終買進判定
-    buy_signal = nec_pass and trend_filter_pass and bonus_pass
-    
-    # 賣出判定
-    # 停利
-    sell_take_profit = (k_curr >= 80 and k_curr < d_curr and k_prev >= d_prev) or (j_prev >= 100 and j_curr < j_prev)
-    # 停損
-    sell_stop_loss = curr['Close'] < curr['MA20']
-    
-    # 顯示 UI
     kdj_c1, kdj_c2 = st.columns(2)
     with kdj_c1:
-        st.write("#### 🟢 買進訊號檢查")
-        st.write("**【必要條件】(需全符合)**")
-        check_item(f"D 值低檔 (D={d_curr:.1f} ≤ 40)", d_curr, cond_d_low)
-        check_item("K 在 D 之上 (不一定當天黃金交叉)", "Yes" if cond_k_above_d else "No", cond_k_above_d)
-        check_item("股價未創新低 (近5日)", "Yes" if cond_no_new_low else "No", cond_no_new_low)
+        st.write("#### 🟢 買進/觀察訊號 (KDJ 狀態)")
+        # 直接使用引擎理由中關於 KDJ 的部分
+        kdj_msg = "KDJ 狀態：分析中..."
+        if reason:
+            kdj_parts = [p for p in reason.split("；") if "KDJ" in p]
+            if kdj_parts: kdj_msg = kdj_parts[0]
         
-        st.write("**【趨勢過濾】(至少符合 1 項)**")
-        check_item("站上月線 (C > MA20)", "Yes" if tf_a else "No", tf_a)
-        check_item("回測月線不破 (Low ≥ MA20)", "Yes" if tf_c else "No", tf_c)
-        
-        st.write(f"**【加分條件】(目前 {bonus_score} 分, 需 ≥ 2，4 選 2)**")
-        check_item("J 值超賣 (J < 20)", f"{j_curr:.1f}", b1)
-        check_item("量能不縮 (V ≥ 0.8 × Vol_MA5)", "Yes" if b2 else "No", b2)
-        check_item("KD 同步上彎", "Yes" if b3 else "No", b3)
-        check_item("均線多頭 (MA20 > MA60)", "Yes" if b4 else "No", b4)
-        
-        if buy_signal:
-            st.success("✨ **符合買進訊號！** (多頭或盤整低檔啟動)")
+        if buy:
+            st.success(f"✨ **符合進場特徵**\n\n{kdj_msg}")
+        elif watch:
+            st.warning(f"👀 **觀察結構成立**\n\n{kdj_msg}")
         else:
-            st.write("👉 **未觸發買進**")
-
-    with kdj_c2:
-        st.write("#### 🔴 賣出訊號檢查")
-        st.write("**【停利訊號】**")
-        if sell_take_profit:
-            st.error("⚠️ 出現停利特徵 (高檔鈍化結束或死叉)")
-        else:
-            st.write("無 (持有續抱)")
+            st.info(f"⚪ **尚未符合進場條件**\n\n{kdj_msg}")
             
-        st.write("**【停損訊號】(最優先)**")
-        if sell_stop_loss:
-            st.error("🛑 跌破月線 (MA20)，建議停損/出場")
+    with kdj_c2:
+        st.write("#### 🔴 賣出/出場警示監測")
+        if exit_conditions:
+            for cond in exit_conditions:
+                st.error(f"⚠️ {cond}")
         else:
-            st.write("✅ 股價守穩月線")
+            st.write("✅ **目前無明顯轉弱或出場訊號** (持有續抱)")
 
     # 一句話判定
-    st.info("💡 **AI 總結**：多頭或盤整中，KDJ 低檔黃金交叉，且價格不再破低並有量能確認，才允許買進。")
+    summary_msg = "趨勢結構完整，請參考上方進場/出場建議執行操作。" if buy or watch else "目前不符合策略邏輯，建議觀望。"
+    st.info(f"💡 **AI 總結**：{summary_msg}")
     st.markdown("---")
 
     # 策略判定
@@ -2451,38 +2387,32 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     price_breakout = curr['High_60']
     price_current = curr['Close']
     
-    action_type = "觀察"
-    if not trend_pass:
-        action_type = "空手/避開"
-        msg_title = "🛑 趨勢結構破壞"
-        msg_desc = "股價位於季線下方或均線空頭排列，目前不適合任何操作。"
-        msg_color = "error"
-    elif trend_pass and not (mom_pass or pv_pass):
-        action_type = "防守等待"
-        msg_title = "🛡️ 趨勢對，節奏未到 (防守型)"
-        msg_desc = f"多頭結構成立，但缺乏攻擊動能。**不建議追價**，請等待回測季線支撐 **{price_defensive:.0f}** 不破再佈局。"
-        msg_color = "info" 
-    elif trend_pass and (mom_pass or pv_pass):
+    # 根據引擎訊號決定戰略 (同步引擎引擎結果)
+    if buy:
         action_type = "積極攻擊"
-        msg_title = "🚀 趨勢與動能同步 (攻擊型)"
-        msg_desc = "量能或指標轉強，可嘗試積極操作，亦可關注突破前高後的動能延續。"
-        msg_color = "success" 
+        msg_title = "🚀 策略提示：執行買進"
+        msg_desc = f"引擎判定模式為 {mode}，目前為理想進場點。建議停損設於 {stop_loss_price if stop_loss_price else '-'}。"
+        msg_color = "success"
+    elif watch:
+        action_type = "防守等待"
+        msg_title = "🛡️ 策略提示：觀察等待"
+        msg_desc = "趨勢結構正確，但尚未出現最佳觸發點。請等待回測或帶量突破。"
+        msg_color = "info"
     else:
-        msg_title = "⚠️ 投機型操作"
-        msg_desc = "技術面強勢但基本面分數過低，僅適合短線價差。"
-        msg_color = "warning"
+        action_type = "空手/避開"
+        msg_title = "🛑 策略提示：暫不操作"
+        msg_desc = "目前結構不符合策略。請耐心等待趨勢明朗。"
+        msg_color = "error"
 
     if msg_color == "success": st.success(f"**{msg_title}**\n\n{msg_desc}")
     elif msg_color == "info": st.info(f"**{msg_title}**\n\n{msg_desc}")
-    elif msg_color == "warning": st.warning(f"**{msg_title}**\n\n{msg_desc}")
     else: st.error(f"**{msg_title}**\n\n{msg_desc}")
 
-    # 價格分級表 (適配深色模式)
-    row1_style = "background-color: #1B5E20; color: #FAFAFA;" if action_type == "積極攻擊" else ""
-    row2_style = "background-color: #E65100; color: #FAFAFA;" if action_type == "防守等待" else ""
+    # 價格分級表 (樣式優化)
+    row_success_style = "background-color: #1B5E20; color: #FAFAFA;" if buy else ""
+    row_info_style = "background-color: #0D47A1; color: #FAFAFA;" if watch and not buy else ""
     
     st.markdown(f"""
-    <style> .stTable td {{ vertical-align: middle; }} </style>
     <table style="width:100%; text-align: left; border-collapse: collapse;">
         <thead>
             <tr style="border-bottom: 2px solid #444; background-color: #262730; color: #FAFAFA;">
@@ -2493,29 +2423,29 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
             </tr>
         </thead>
         <tbody>
-            <tr style="{row1_style}">
-                <td style="padding: 8px;">🚀 <strong>追價/壓力</strong></td>
+            <tr style="{row_success_style}">
+                <td style="padding: 8px;">🚀 <strong>壓力參考</strong></td>
                 <td style="padding: 8px;">{price_breakout:.2f}</td>
-                <td style="padding: 8px;">前波高點壓力</td>
-                <td style="padding: 8px;">若帶量突破，可視為新波段起點。</td>
+                <td style="padding: 8px;">60日最高壓力</td>
+                <td style="padding: 8px;">若帶量突破，可視為新波段確認。</td>
             </tr>
             <tr>
                 <td style="padding: 8px;">📍 <strong>目前市價</strong></td>
                 <td style="padding: 8px;"><strong>{price_current:.2f}</strong></td>
                 <td style="padding: 8px;">當下成交價</td>
-                <td style="padding: 8px;">需搭配動能判斷。</td>
+                <td style="padding: 8px;">目前的持倉成本參考。</td>
             </tr>
-            <tr style="{row2_style}">
-                <td style="padding: 8px;">🛡️ <strong>防守/支撐</strong></td>
-                <td style="padding: 8px; color: blue;"><strong>{price_defensive:.2f}</strong></td>
+            <tr style="{row_info_style}">
+                <td style="padding: 8px;">🛡️ <strong>趨勢支撐</strong></td>
+                <td style="padding: 8px;"><strong>{price_ma60:.2f}</strong></td>
                 <td style="padding: 8px;">MA60 (季線)</td>
-                <td style="padding: 8px;"><strong>中期多頭防守線。</strong></td>
+                <td style="padding: 8px;">中期多頭生命線。</td>
             </tr>
             <tr style="border-top: 1px solid #444; color: #FF4B4B;">
-                <td style="padding: 8px;">🛑 <strong>停損參考</strong></td>
-                <td style="padding: 8px;">{price_defensive * 0.98:.2f}</td>
-                <td style="padding: 8px;">跌破季線 2%</td>
-                <td style="padding: 8px;">有效跌破季線建議停損。</td>
+                <td style="padding: 8px;">🛑 <strong>停損/出場點</strong></td>
+                <td style="padding: 8px;"><strong>{stop_loss_price if stop_loss_price else "-"}</strong></td>
+                <td style="padding: 8px;">動態停損位</td>
+                <td style="padding: 8px;">跌破此價位建議執行出場。</td>
             </tr>
         </tbody>
     </table>
@@ -2571,6 +2501,15 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='blue', width=2), name='MA60 (防守)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['High_60'], line=dict(color='gray', dash='dash'), name='60日高 (壓力)'), row=1, col=1)
+
+    # --- 停損線標註 ---
+    if stop_loss_price and stop_loss_price > 0:
+        fig.add_trace(go.Scatter(
+            x=df_plot.index, 
+            y=[stop_loss_price] * len(df_plot), 
+            line=dict(color='red', width=2, dash='dot'), 
+            name=f'停損參考 {stop_loss_price:.2f}'
+        ), row=1, col=1)
     # --- Row 2: 成交量 (顏色跟隨當日漲跌，單位改為「張」) ---
     price_change = df_plot['Close'] - df_plot['Close'].shift(1)
     colors_vol = [COLOR_UP if c >= 0 else COLOR_DOWN for c in price_change]
