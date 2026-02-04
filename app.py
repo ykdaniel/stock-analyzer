@@ -2567,6 +2567,7 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     ), row=1, col=1)
     
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA5'], line=dict(color='purple', width=1), name='MA5'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='#00BCD4', width=1), name='MA10'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='blue', width=2), name='MA60 (防守)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['High_60'], line=dict(color='gray', dash='dash'), name='60日高 (壓力)'), row=1, col=1)
