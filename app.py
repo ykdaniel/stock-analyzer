@@ -313,10 +313,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 損益計算工具 ---
-def calculate_tradelog(code, buy_price, current_price, qty, fee_discount=0.6):
+def calculate_tradelog(code, buy_price, current_price, qty, fee_discount=1.0):
     """
     計算交易損益與費用（統一邏輯）
-    :param fee_discount: 手續費折扣 (例如 0.6 代表 6 折)
+    :param fee_discount: 手續費折扣 (預設 1.0 = 無折扣，依使用者券商實況調整)
     """
     raw_cost = buy_price * qty
     raw_value = current_price * qty
@@ -333,15 +333,15 @@ def calculate_tradelog(code, buy_price, current_price, qty, fee_discount=0.6):
     is_etf = code_num.startswith('00') and len(code_num) <= 6
     tax_rate = TAX_RATE_ETF if is_etf else TAX_RATE_STOCK
     
-    # 買入手續費 (無條件進位，最低 20 元)
+    # 買入手續費 (使用 int 截斷，符合使用者券商邏輯)
     buy_fee_raw = raw_cost * FEE_RATE * fee_discount
-    buy_fee = max(MIN_FEE, math.ceil(buy_fee_raw)) if buy_fee_raw > 0 else 0
+    buy_fee = max(MIN_FEE, int(buy_fee_raw)) if buy_fee_raw > 0 else 0
     total_cost = raw_cost + buy_fee
     
     # 賣出預估費用 (手續費 + 證交稅)
     sell_fee_raw = raw_value * FEE_RATE * fee_discount
-    sell_fee = max(MIN_FEE, math.ceil(sell_fee_raw)) if sell_fee_raw > 0 else 0
-    sell_tax = math.ceil(raw_value * tax_rate)
+    sell_fee = max(MIN_FEE, int(sell_fee_raw)) if sell_fee_raw > 0 else 0
+    sell_tax = int(raw_value * tax_rate)
     
     net_value = raw_value - sell_fee - sell_tax
     unrealized_profit = net_value - total_cost
