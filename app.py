@@ -2784,6 +2784,13 @@ def clear_temp_data():
         st.session_state.pop(k, None)
 
 
+# 手續費折扣設定
+fee_discount_input = st.sidebar.slider(
+    "手續費折扣 (10折 = 1.0)",
+    min_value=0.1, max_value=1.0, value=0.6, step=0.05,
+    help="台灣大部分券商網路下單約 6 折或更低。2.8 折則設為 0.28。"
+)
+
 # 預設為一個月前
 default_start_date = pd.Timestamp.today() - pd.DateOffset(months=1)
 start_date = st.sidebar.date_input(
