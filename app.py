@@ -2437,7 +2437,7 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
             </tr>
             <tr style="{row_info_style}">
                 <td style="padding: 8px;">🛡️ <strong>趨勢支撐</strong></td>
-                <td style="padding: 8px;"><strong>{price_ma60:.2f}</strong></td>
+                <td style="padding: 8px;"><strong>{price_defensive:.2f}</strong></td>
                 <td style="padding: 8px;">MA60 (季線)</td>
                 <td style="padding: 8px;">中期多頭生命線。</td>
             </tr>
