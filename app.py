@@ -1626,10 +1626,12 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str,
     
     # Exit_Defensive: 僅對 Trend 模式檢查（Pullback 本來就在低檔）
     if strategy_mode == "Trend":
-        if close < ma20:
-            exit_conditions.append("防守出場：收盤價跌破 MA20")
+        if close < ma5:
+            exit_conditions.append("短線轉弱：收盤價跌破 MA5 (攻擊暫歇)")
         if close < ma10:
-            exit_conditions.append("防守出場：收盤價跌破 MA10")
+            exit_conditions.append("防守出場：收盤價跌破 MA10 (波段警戒)")
+        if close < ma20:
+            exit_conditions.append("趨勢破壞：收盤價跌破 MA20 (生命線)")
     
     # Exit_Trend_End: 趨勢結構破壞（對所有模式都重要）
     if ma20_slope < 0 and strategy_mode == "Trend":
@@ -2217,12 +2219,14 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     if exit_conditions:
         st.markdown("### 🚪 出場條件提醒")
         for cond in exit_conditions:
-            if "過熱" in cond:
-                st.error(f"🔥 {cond}")
-            elif "趨勢結束" in cond:
-                st.warning(f"⚠️ {cond}")
+            if "趨勢破壞" in cond or "過熱" in cond:
+                st.error(f"🔥 {cond}")  # 紅色：嚴重警示
+            elif "防守出場" in cond or "趨勢結束" in cond:
+                st.warning(f"⚠️ {cond}")  # 黃色：標準出場
+            elif "短線轉弱" in cond:
+                st.info(f"📉 {cond}")     # 藍色：早期預警
             else:
-                st.info(f"📉 {cond}")
+                st.info(f"ℹ️ {cond}")
         st.markdown("---")
     
     # ===== ❌ 不買入原因區塊（僅在非 Buy 時顯示）=====
