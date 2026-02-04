@@ -3333,16 +3333,26 @@ elif mode == "📦 我持有的股票診斷":
             raw_cost = buy_price * qty
             raw_value = latest * qty
 
-            # 費用計算 (手續費 0.1425%, 交易稅 0.3%)
-            FEE_RATE = 0.001425
-            TAX_RATE = 0.003
+            # 費用計算常數
+            FEE_RATE = 0.001425      # 手續費 0.1425%
+            TAX_RATE_STOCK = 0.003   # 一般股票證交稅 0.3%
+            TAX_RATE_ETF = 0.001     # ETF 證交稅 0.1%
+            MIN_FEE = 20             # 最低手續費 20 元
             
-            # 買入手續費 (無條件進入或四捨五入，這邊採標準算法)
-            buy_fee = int(raw_cost * FEE_RATE)
+            # 判斷是否為 ETF（代號以 00 開頭且為 4-6 碼數字）
+            code_num = code.replace('.TW', '').replace('.TWO', '')
+            is_etf = code_num.startswith('00') and len(code_num) <= 6
+            tax_rate = TAX_RATE_ETF if is_etf else TAX_RATE_STOCK
+            
+            # 買入手續費 (無條件進位，最低 20 元)
+            import math
+            buy_fee_raw = raw_cost * FEE_RATE
+            buy_fee = max(MIN_FEE, math.ceil(buy_fee_raw)) if buy_fee_raw > 0 else 0
             
             # 賣出預估費用 (手續費 + 證交稅)
-            sell_fee = int(raw_value * FEE_RATE)
-            sell_tax = int(raw_value * TAX_RATE)
+            sell_fee_raw = raw_value * FEE_RATE
+            sell_fee = max(MIN_FEE, math.ceil(sell_fee_raw)) if sell_fee_raw > 0 else 0
+            sell_tax = math.ceil(raw_value * tax_rate)
             
             # 修正後的總成本 (含買入手續費)
             total_cost = raw_cost + buy_fee
