@@ -3479,15 +3479,36 @@ elif mode == "📦 我持有的股票診斷":
         else:
             st.info("尚無持股資料")
 
-        # 選擇持股以編輯或賣出
-        codes = [r['代號'] for r in rows]
-        sel = st.selectbox('選擇要操作的持股', options=['--']+codes)
-        if sel and sel != '--':
-            selected = next((h for h in st.session_state['holdings'] if h.get('code')==sel), None)
-            if selected:
+        # 選擇持股以編輯或賣出 (改為支援多筆同代號持股辨識)
+        # 使用 Index 與詳細資訊作為選項
+        options_map = {}
+        display_options = ['--']
+        
+        for idx, h in enumerate(st.session_state['holdings']):
+            c = h.get('code')
+            n = get_stock_display_name(c).split(' ')[-1] # 簡化名稱
+            d = h.get('buy_date')
+            p = float(h.get('buy_price', 0))
+            q = int(h.get('qty', 0))
+            
+            # 顯示格式: "1. 2330.TW (2026-02-04 買入 @ $500, 1000股)"
+            label = f"{idx+1}. {c} {n} ({d} 買入 @ {p}, {q}股)"
+            display_options.append(label)
+            options_map[label] = idx
+
+        sel_label = st.selectbox('選擇要操作的持股', options=display_options)
+        
+        if sel_label and sel_label != '--':
+            target_idx = options_map[sel_label]
+            
+            # 安全檢查
+            if 0 <= target_idx < len(st.session_state['holdings']):
+                selected = st.session_state['holdings'][target_idx]
+                sel_code = selected.get('code') # 取得代號供後續查詢
+                
                 # 顯示分析/建議（單獨區塊，而非表格欄位）
                 analyses = st.session_state.get('holdings_analysis', {})
-                a = analyses.get(sel)
+                a = analyses.get(sel_code)
                 with st.expander('🔔 分析結果與建議', expanded=True):
                     if a:
                         rec = a.get('rec', '')
@@ -3543,12 +3564,14 @@ elif mode == "📦 我持有的股票診斷":
                     else:
                         st.info('此持股尚未分析，請按「分析並建議操作」以取得建議。')
 
-                # 刪除此持股
+                # 刪除此持股 (依據 Index 刪除，精確定位)
                 if st.button('🗑 刪除此持股', type="secondary"):
-                    st.session_state['holdings'] = [h for h in st.session_state['holdings'] if h.get('code') != sel]
-                    save_json(HOLDINGS_FILE, st.session_state['holdings'])
-                    st.success('已刪除該持股')
-                    st.rerun()
+                    # 使用 pop 移除特定 index 的持股
+                    if 0 <= target_idx < len(st.session_state['holdings']):
+                        removed = st.session_state['holdings'].pop(target_idx)
+                        save_json(HOLDINGS_FILE, st.session_state['holdings'])
+                        st.success(f"已刪除持股: {removed.get('code')} ({removed.get('buy_date')})")
+                        st.rerun()
 
                 st.markdown('**編輯持股**')
                 with st.form('edit_holding'):
@@ -3572,7 +3595,7 @@ elif mode == "📦 我持有的股票診斷":
                         sell_date = st.date_input('賣出日期')
                         sell_price = st.number_input('賣出價格', min_value=0.0, format='%f')
                     with s_col2:
-                        sell_qty = st.number_input('股數 (預設為持有股數)', value=int(selected.get('qty')), step=50, min_value=50)
+                        sell_qty = st.number_input('股數 (預設為持有股數)', value=int(selected.get('qty')), step=1, min_value=1)
                         sell_note = st.text_input('備註 (選填)')
                     s_submit = st.form_submit_button('確認賣出並移至歷史')
                     if s_submit:
@@ -3580,8 +3603,10 @@ elif mode == "📦 我持有的股票診斷":
                         buy_price = float(selected.get('buy_price'))
                         buy_date = selected.get('buy_date')
                         qty = int(sell_qty)
-                        realized = (float(sell_price) - buy_price) * qty
-                        realized_pct = ((float(sell_price)/buy_price - 1) * 100) if buy_price != 0 else None
+                        
+                        # 使用統一函式計算賣出損益（僅供紀錄參考，歷史列表會重算）
+                        # 這裡簡單紀錄即可，詳細由 history display handling
+                        
                         rec = {
                             'code': selected.get('code'),
                             'name': get_stock_display_name(selected.get('code')),
@@ -3590,16 +3615,19 @@ elif mode == "📦 我持有的股票診斷":
                             'sell_date': sell_date.strftime('%Y-%m-%d'),
                             'sell_price': float(sell_price),
                             'qty': qty,
-                            'realized_profit': realized,
-                            'realized_pct': realized_pct,
                             'note': sell_note
                         }
                         st.session_state['history'].append(rec)
+                        
                         # reduce or remove holding
                         if qty >= int(selected.get('qty')):
-                            st.session_state['holdings'] = [h for h in st.session_state['holdings'] if h.get('code')!=selected.get('code')]
+                            # 賣出全部：依據 index 移除該筆持股
+                            if 0 <= target_idx < len(st.session_state['holdings']):
+                                st.session_state['holdings'].pop(target_idx)
                         else:
+                            # 賣出部分：更新剩餘股數
                             selected['qty'] = int(selected.get('qty')) - qty
+                            
                         save_json(HOLDINGS_FILE, st.session_state['holdings'])
                         save_json(HISTORY_FILE, st.session_state['history'])
                         st.success('已紀錄賣出，並移至歷史資料')
