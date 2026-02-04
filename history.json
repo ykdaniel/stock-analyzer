@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "code": "2344.TW",
+    "name": "華邦電",
+    "buy_date": "2026-01-20",
+    "buy_price": 114.75,
+    "sell_date": "2026-01-30",
+    "sell_price": 132.0,
+    "qty": 2000,
+    "realized_profit": 34500.0,
+    "realized_pct": 15.032679738562083,
+    "note": ""
+  },
+  {
+    "code": "2303.TW",
+    "name": "聯電",
+    "buy_date": "2026-01-21",
+    "buy_price": 70.9,
+    "sell_date": "2026-01-30",
+    "sell_price": 62.5,
+    "qty": 1000,
+    "realized_profit": -8400.000000000005,
+    "realized_pct": -11.847672778561357,
+    "note": ""
+  }
+]

@@ -14,17 +14,17 @@
     "note": ""
   },
   {
-    "code": "2344.TW",
-    "buy_date": "2026-01-20",
-    "buy_price": 114.75,
-    "qty": 2000,
-    "note": ""
-  },
-  {
     "code": "6505.TW",
     "buy_date": "2026-01-20",
     "buy_price": 54.2,
     "qty": 10000,
+    "note": ""
+  },
+  {
+    "code": "0050.TW",
+    "buy_date": "2026-02-02",
+    "buy_price": 71.1,
+    "qty": 1000,
     "note": ""
   }
 ]

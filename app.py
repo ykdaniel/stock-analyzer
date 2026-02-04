@@ -1,16 +1,46 @@
 """
 AI 量化戰情室 - 台股分析系統
 
-【安全性增強版本】
-- 已移除重複函數定義
-- 保留較新版本的函數
-- 建議在生產環境使用前充分測試
+【策略引擎升級版本 v2.0】
 
-修復日期：2026-01-24
-修復內容：
-  1. 移除 6 個重複函數定義（analyze_stock, advanced_quant_filter 等）
-  2. 保留功能較完整的版本
-  3. 語法驗證通過
+修復日期：2026-02-04
+升級內容：
+  1. 修正邏輯鎖死問題
+     - NEUTRAL 市場不再直接 NoTrade，允許 Stock Picking 模式
+     - Buy 不被 Watch 狀態硬鎖（Buy = Trend_Buy OR Pullback_Buy）
+  
+  2. KDJ 規則依 Mode 切換
+     - Pullback 模式：D <= 40 AND K >= D（低檔買入）
+     - Trend 模式：NOT (K < D AND D falling)（避免高檔死叉）
+  
+  3. 補齊 Exit/Sell 條件
+     - Exit_Defensive: Close < MA20 OR Close < MA10
+     - Exit_Trend_End: MA20_slope < 0 OR MA20 < MA60
+     - Exit_Overheat: RSI > 80 OR KDJ 高檔死叉
+  
+  4. 新增倉位建議（Position Sizing）
+     - 輸出等級：No_Position, Light, Medium, Heavy, Full
+     - 依市場狀態與模式決定基礎倉位
+     - 估值警示/高波動會自動降倉
+  
+  5. 動態停損位計算（ATR 緩衝）
+     - Pullback 模式：Swing_Low - ATR * 0.5
+     - Trend 模式：MA20 - ATR * 1.0
+     - ATR 快取避免重複計算
+     - ATR 異常波動防呆（上限鉗制、比例檢查）
+  
+  6. 動態估值與 EPS 警示
+     - EPS > 20 僅作警示，不否決 Buy
+     - PE > 40 一律視為「昂貴」
+     - 動態合理 PE 連動成長率
+  
+  7. 輸出完整交易卡片
+     - signal, mode, market_regime, position_level
+     - entry_price, stop_loss_price, atr, risk_pct
+     - exit_conditions, not_buy_reasons, valuation_warning
+
+歷史修復：
+  2026-01-24: 移除 6 個重複函數定義，語法驗證通過
 """
 
 import streamlit as st
@@ -45,6 +75,213 @@ except ImportError:
 # 顏色設定 (Antigravity 專業版：旗艦紅綠配色)
 COLOR_UP = '#FF4B4B'    # 鮮豔紅 (上漲)
 COLOR_DOWN = '#00D964'  # 鮮豔綠 (下跌)
+
+# ==========================================
+# ATR 計算與快取模組
+# ==========================================
+# NOTE: ATR 是「尺度」，用於計算停損緩衝，不是「結構」判斷依據
+
+ATR_CACHE: Dict[tuple, float] = {}  # key: (symbol, date_str)
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    計算 Average True Range (ATR)
+    
+    ATR = Rolling Mean of True Range
+    True Range = max(High - Low, abs(High - prev_Close), abs(Low - prev_Close))
+    """
+    if df is None or df.empty or len(df) < period:
+        return pd.Series(dtype=float)
+    
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    
+    atr = tr.rolling(period).mean()
+    return atr
+
+
+def get_atr(symbol: str, df: pd.DataFrame, date: Any = None) -> Optional[float]:
+    """
+    取得 ATR 值（含快取機制）
+    
+    快取規則：
+    - cache key = (symbol, trading_date)
+    - 同一檔股票、同一交易日只計算一次
+    """
+    if df is None or df.empty:
+        return None
+    
+    # 決定日期（預設使用最後一筆資料的日期）
+    if date is None:
+        date = df.index[-1]
+    
+    try:
+        date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
+    except Exception:
+        date_str = str(date)
+    
+    cache_key = (symbol, date_str)
+    
+    if cache_key in ATR_CACHE:
+        return ATR_CACHE[cache_key]
+    
+    atr_series = calculate_atr(df)
+    if atr_series.empty:
+        return None
+    
+    try:
+        atr_value = float(atr_series.iloc[-1])
+    except Exception:
+        return None
+    
+    # ATR 異常波動防呆：上限鉗制（Hard Cap）
+    # 避免跳空、財報日等極端情況導致停損距離過大
+    if len(atr_series) >= 60:
+        atr_median_60 = float(atr_series.tail(60).median())
+        atr_cap = atr_median_60 * 2.5
+        if atr_value > atr_cap:
+            logger.debug("ATR 超過上限 (%.2f > %.2f)，使用鉗制值", atr_value, atr_cap)
+            atr_value = atr_cap
+    
+    ATR_CACHE[cache_key] = atr_value
+    return atr_value
+
+
+def get_volatility_flag(atr: float, close: float) -> str:
+    """
+    根據 ATR / Close 比例判斷市場波動程度
+    
+    回傳：'Normal' | 'High' | 'Extreme'
+    """
+    if atr is None or close is None or close <= 0:
+        return "Normal"
+    
+    ratio = atr / close
+    if ratio > 0.12:
+        return "Extreme"
+    elif ratio > 0.06:
+        return "High"
+    else:
+        return "Normal"
+
+
+# ==========================================
+# 倉位等級定義（Position Sizing）
+# ==========================================
+# NOTE: 只輸出「等級」，不輸出 %，等級代表風險容忍度
+
+class PositionLevel:
+    NO_POSITION = "No_Position"  # 不建議進場
+    LIGHT = "Light"              # 試單（輕倉）
+    MEDIUM = "Medium"            # 中等倉位
+    HEAVY = "Heavy"              # 重倉
+    FULL = "Full"                # 滿倉（全押）
+
+POSITION_ORDER = [
+    PositionLevel.NO_POSITION,
+    PositionLevel.LIGHT,
+    PositionLevel.MEDIUM,
+    PositionLevel.HEAVY,
+    PositionLevel.FULL,
+]
+
+
+def adjust_position_down(current_level: str) -> str:
+    """將倉位等級往下調整一級"""
+    try:
+        idx = POSITION_ORDER.index(current_level)
+        if idx > 0:
+            return POSITION_ORDER[idx - 1]
+    except ValueError:
+        pass
+    return PositionLevel.NO_POSITION
+
+
+# ==========================================
+# 估值參數設定（Valuation Settings）
+# ==========================================
+# NOTE: EPS > EPS_HIGH_THRESHOLD 且 YoY Growth < 20% → 輸出估值警示
+
+EPS_HIGH_THRESHOLD = 20.0      # EPS 高位警示門檻
+YOY_GROWTH_THRESHOLD = 0.20    # YoY 成長率門檻（20%）
+PE_EXPENSIVE_THRESHOLD = 40    # PE > 40 一律視為「昂貴」
+PE_REASONABLE_BASE = 25        # 基準合理 PE
+PE_GROWTH_MULTIPLIER = 35      # 若成長率 > 30%，合理 PE 可上修至此值
+
+
+def get_reasonable_pe(yoy_growth: Optional[float]) -> float:
+    """
+    動態計算合理 PE 倍數
+    
+    規則：
+    - 若成長率 > 30%，合理倍數上修至 35 倍
+    - 否則基準合理倍數為 25 倍
+    """
+    if yoy_growth is not None and yoy_growth > 0.30:
+        return PE_GROWTH_MULTIPLIER
+    return PE_REASONABLE_BASE
+
+
+def get_valuation_status(pe: Optional[float], eps: Optional[float], yoy_growth: Optional[float]) -> Dict[str, Any]:
+    """
+    動態估值判斷
+    
+    回傳：
+    {
+        "status": "cheap" | "reasonable" | "expensive",
+        "warning": bool,
+        "reason": str,
+        "reasonable_pe": float
+    }
+    """
+    result = {
+        "status": "reasonable",
+        "warning": False,
+        "reason": "",
+        "reasonable_pe": PE_REASONABLE_BASE,
+    }
+    
+    if pe is None or pe == float('inf'):
+        result["status"] = "unknown"
+        result["reason"] = "無法取得 PE 資料"
+        return result
+    
+    reasonable_pe = get_reasonable_pe(yoy_growth)
+    result["reasonable_pe"] = reasonable_pe
+    
+    # PE > 40 一律昂貴
+    if pe > PE_EXPENSIVE_THRESHOLD:
+        result["status"] = "expensive"
+        result["warning"] = True
+        result["reason"] = f"PE ({pe:.1f}) > {PE_EXPENSIVE_THRESHOLD}，估值昂貴"
+        return result
+    
+    # EPS 高位警示
+    if eps is not None and eps > EPS_HIGH_THRESHOLD:
+        if yoy_growth is None or yoy_growth < YOY_GROWTH_THRESHOLD:
+            result["warning"] = True
+            result["reason"] = f"EPS ({eps:.2f}) > {EPS_HIGH_THRESHOLD} 但成長率不足 {YOY_GROWTH_THRESHOLD*100:.0f}%，估值偏高警示"
+    
+    # 根據合理 PE 判斷
+    if pe < reasonable_pe * 0.7:
+        result["status"] = "cheap"
+        result["reason"] = f"PE ({pe:.1f}) < 合理倍數的 70%，估值便宜"
+    elif pe > reasonable_pe:
+        result["status"] = "expensive"
+        if not result["warning"]:
+            result["reason"] = f"PE ({pe:.1f}) > 合理倍數 ({reasonable_pe})，估值偏高"
+    else:
+        result["reason"] = f"PE ({pe:.1f}) 在合理範圍內"
+    
+    return result
+
 
 # --- 全域 CSS 樣式 ---
 st.markdown("""
@@ -714,6 +951,18 @@ class TechProvider:
         df['D'] = df['K'].ewm(com=2, adjust=False).mean()
         df['J'] = 3 * df['K'] - 2 * df['D']
 
+        # --- ATR 計算（供停損緩衝使用）---
+        # True Range = max(High - Low, abs(High - prev_Close), abs(Low - prev_Close))
+        tr = pd.concat([
+            df['High'] - df['Low'],
+            (df['High'] - df['Close'].shift()).abs(),
+            (df['Low'] - df['Close'].shift()).abs()
+        ], axis=1).max(axis=1)
+        df['ATR'] = tr.rolling(14).mean()
+        
+        # Swing Low（近10日最低點，供回檔模式停損使用）
+        df['Swing_Low_10'] = df['Low'].rolling(10).min()
+
         return df
 
 class ChipProvider:
@@ -1085,20 +1334,41 @@ def select_strategy_mode(df: pd.DataFrame, market_regime: str) -> Dict[str, Any]
     }
 
 
-def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> Dict[str, Any]:
+def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str, 
+                   stock_id: str = "", fundamentals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Layer 3: 股票篩選（Stock Evaluation）
     
-    職責：根據選定的 Mode，評估單一股票的 Watch/Buy 狀態
-    嚴格分離：Mode ≠ Buy，Watch 是 Buy 的必要前置狀態
+    職責：根據選定的 Mode，評估單一股票的 Watch/Buy/Exit 狀態
     
     核心原則：
     - Watch = 結構成立，但尚未出現低風險進場點
-    - Buy = 嚴格的事件觸發（突破/回測成功/止跌訊號）
+    - Buy = 趨勢型買點 OR 回檔型買點（不被 Watch 硬鎖）
+    - Exit = 防守型出場 OR 趨勢結束 OR 過熱出場
     - 高檔乖離保護：close/ma60 > MAX_MA60_EXTENSION → Buy 強制 False
     
-    輸出：
+    修正項目：
+    1. NEUTRAL 市場允許做多（Stock Picking/Range Mode）
+    2. KDJ 規則依 Mode 切換
+    3. 補齊 Exit/Sell 條件
+    4. 倉位建議（Position Sizing）
+    5. 動態停損位（ATR 緩衝）
+    6. EPS > 20 僅作警示，不否決 Buy
+    
+    輸出（完整交易卡片）：
     {
+        "signal": "Buy" | "Watch" | "NoTrade" | "Exit",
+        "mode": str,
+        "market_regime": str,
+        "position_level": str,
+        "entry_price": float,
+        "stop_loss_price": float,
+        "atr": float,
+        "stop_loss_method": str,
+        "risk_pct": float,
+        "exit_conditions": List[str],
+        "not_buy_reasons": List[str],
+        "valuation_warning": bool,
         "watch": bool,
         "buy": bool,
         "confidence": int (0-100),
@@ -1108,16 +1378,35 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
     # 高檔乖離上限（25%）
     MAX_MA60_EXTENSION = 1.25
     
+    # ATR 停損緩衝係數
+    ATR_BUFFER_PULLBACK = 0.5  # 回檔模式：Swing_Low - ATR * 0.5
+    ATR_BUFFER_TREND = 1.0     # 趨勢模式：MA20 - ATR * 1.0
+    
+    # 預設輸出結構
+    default_output = {
+        "signal": "NoTrade",
+        "mode": strategy_mode,
+        "market_regime": market_regime,
+        "position_level": PositionLevel.NO_POSITION,
+        "entry_price": None,
+        "stop_loss_price": None,
+        "atr": None,
+        "stop_loss_method": None,
+        "risk_pct": None,
+        "exit_conditions": [],
+        "not_buy_reasons": [],
+        "valuation_warning": False,
+        "watch": False,
+        "buy": False,
+        "confidence": 0,
+        "reason": ""
+    }
+    
     if df is None or df.empty or len(df) < 30:
-        return {
-            "watch": False,
-            "buy": False,
-            "confidence": 0,
-            "reason": "資料不足，無法評估"
-        }
+        default_output["reason"] = "資料不足，無法評估"
+        return default_output
     
     # Helper: 只取「昨天以前」的連續 n 日視窗，嚴格排除今天
-    # NOTE: 此處保留 local 定義以維持函數獨立性，未來可考慮提取至模組層級
     def prev_n_days(series: pd.Series, n: int) -> pd.Series:
         """回傳 series 中，緊鄰「昨天」往前數 n 天的資料視窗。"""
         if series is None or len(series) < n + 1:
@@ -1140,50 +1429,86 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
     rsi_curr = float(curr.get('RSI', float('nan')))
     k = float(curr.get('K', float('nan')))
     d = float(curr.get('D', float('nan')))
+    j = float(curr.get('J', float('nan')))
     prev_k = float(prev.get('K', float('nan'))) if len(df) > 1 else float('nan')
     prev_d = float(prev.get('D', float('nan'))) if len(df) > 1 else float('nan')
     ma60_slope = float(df['MA60'].diff().tail(5).mean()) if 'MA60' in df.columns else 0.0
+    ma20_slope = float(df['MA20'].diff().tail(5).mean()) if 'MA20' in df.columns else 0.0
+    atr = float(curr.get('ATR', float('nan'))) if 'ATR' in curr else None
+    swing_low_10 = float(curr.get('Swing_Low_10', float('nan'))) if 'Swing_Low_10' in curr else None
     
     # 基本過濾：流動性
     liquidity_ok = vol_ma20 > 0
     if not liquidity_ok:
-        return {
-            "watch": False,
-            "buy": False,
-            "confidence": 0,
-            "reason": "流動性不足（Vol_MA20 為 0 或過低）"
-        }
+        default_output["reason"] = "流動性不足（Vol_MA20 為 0 或過低）"
+        default_output["not_buy_reasons"].append("流動性不足")
+        return default_output
     
     # 高檔乖離檢查（用於 Buy 保護）
     ma60_extension_ratio = close / ma60 if ma60 > 0 else 1.0
     is_overextended = ma60_extension_ratio > MAX_MA60_EXTENSION
     
+    # ATR 波動度檢查
+    volatility_flag = get_volatility_flag(atr, close) if atr else "Normal"
+    
+    # ===== 估值警示（不否決 Buy，僅影響倉位建議）=====
+    valuation_warning = False
+    if fundamentals:
+        pe = fundamentals.get('PE', float('inf'))
+        eps = fundamentals.get('EPS', 0)
+        yoy_growth = fundamentals.get('Growth', None)
+        valuation_status = get_valuation_status(pe, eps, yoy_growth)
+        valuation_warning = valuation_status.get("warning", False)
+    
     # 如果市場不允許做多，直接返回
     if market_regime == "BEAR":
-        return {
-            "watch": False,
-            "buy": False,
-            "confidence": 0,
-            "reason": "市場狀態：BEAR，多頭方向關閉"
-        }
+        default_output["reason"] = "市場狀態：BEAR，多頭方向關閉"
+        default_output["not_buy_reasons"].append("空頭市場")
+        return default_output
     
     # 如果沒有 Mode，無法評估
     if strategy_mode == "NoTrade":
-        return {
-            "watch": False,
-            "buy": False,
-            "confidence": 0,
-            "reason": "不符合 Mode A 或 Mode B 的結構條件"
-        }
+        default_output["reason"] = "不符合 Mode A 或 Mode B 的結構條件"
+        default_output["not_buy_reasons"].append("不符合交易結構")
+        return default_output
     
     watch = False
     buy = False
     watch_reason_parts = []
     buy_reason_parts = []
+    not_buy_reasons = []
+    exit_conditions = []
+    
+    # ===== KDJ 規則依 Mode 切換（修正 #3）=====
+    kdj_check_ok = True
+    kdj_reason = ""
+    
+    if strategy_mode == "Pullback":
+        # 回檔模式：D <= 40 AND K >= D（低檔買入）
+        if not pd.isna(k) and not pd.isna(d):
+            if d <= 40 and k >= d:
+                kdj_check_ok = True
+                kdj_reason = "KDJ 符合回檔買入條件（D <= 40, K >= D）"
+            elif d > 40:
+                kdj_check_ok = False
+                kdj_reason = f"KDJ D 值過高（{d:.1f} > 40），非低檔區"
+            else:
+                kdj_check_ok = False
+                kdj_reason = f"KDJ K < D（{k:.1f} < {d:.1f}），未出現金叉"
+    elif strategy_mode == "Trend":
+        # 趨勢模式：NOT (K < D AND D falling)（避免高檔死叉）
+        if not pd.isna(k) and not pd.isna(d) and not pd.isna(prev_d):
+            d_falling = d < prev_d
+            if k < d and d_falling:
+                kdj_check_ok = False
+                kdj_reason = f"KDJ 高檔死叉（K:{k:.1f} < D:{d:.1f}，D 下滑）"
+            else:
+                kdj_check_ok = True
+                kdj_reason = "KDJ 未出現高檔死叉"
     
     # ===== Watch 判定：結構成立，但尚未出現低風險進場點 =====
-    # Watch = True 條件：Market Regime = BULL，Mode = A or B，未出現結構破壞
-    if market_regime == "BULL":
+    # 修正 #1: NEUTRAL 市場也允許 Watch/Buy
+    if market_regime in ["BULL", "NEUTRAL"]:
         if strategy_mode == "Trend":  # Mode B
             # Mode B Watch: 趨勢結構成立，但未出現明確進場觸發
             price_above_ma20 = close > ma20
@@ -1191,6 +1516,10 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
             ma20_above_ma60 = ma20 >= ma60
             ma60_rising = ma60_slope > 0
             no_structure_break = price_above_ma60  # 未破 MA60
+            
+            # NEUTRAL 市場放寬 MA60 上揚條件
+            if market_regime == "NEUTRAL":
+                ma60_rising = ma60_slope >= 0  # 允許走平
             
             if price_above_ma20 and price_above_ma60 and ma20_above_ma60 and ma60_rising and no_structure_break:
                 watch = True
@@ -1212,8 +1541,19 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
                 watch_reason_parts.append("Mode A 回檔型，結構完整，等待止跌訊號")
     
     # ===== Buy 判定：嚴格的事件觸發 =====
-    # NOTE: 高檔乖離保護提前檢查，避免無效的 Buy 判斷計算
-    if watch and not is_overextended:  # Buy 只能在 Watch 為 True 且無高檔乖離時觸發
+    # 修正 #2: Buy = Trend_Buy OR Pullback_Buy（不被 Watch 硬鎖）
+    # 但仍需高檔乖離保護和 KDJ 檢查
+    can_buy = not is_overextended and kdj_check_ok
+    
+    if not kdj_check_ok:
+        not_buy_reasons.append(kdj_reason)
+    if is_overextended:
+        not_buy_reasons.append(f"高檔乖離 {ma60_extension_ratio:.1%} > 25%")
+    if volatility_flag == "Extreme":
+        can_buy = False
+        not_buy_reasons.append(f"波動度 Extreme（ATR/Price > 12%）")
+    
+    if can_buy:
         if strategy_mode == "Trend":  # Mode B
             # Mode B Buy: 突破型 或 回測型（二選一）
             prev10_high = prev_n_days(df['High'], 10)
@@ -1240,9 +1580,11 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
             
             if breakout_trigger:
                 buy = True
+                watch = True  # Buy 必然也是 Watch
                 buy_reason_parts.append("Mode B 突破觸發：收盤價創近10日新高且量能放大 ≥ 1.5×20日均量")
             elif pullback_trigger:
                 buy = True
+                watch = True
                 buy_reason_parts.append("Mode B 回測觸發：回測 MA20/MA10 不破，量縮，出現止跌訊號")
         
         elif strategy_mode == "Pullback":  # Mode A
@@ -1256,7 +1598,7 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
             # 條件2：出現止跌訊號（紅K、量縮止跌、KD 反轉等，至少滿足一項）
             bullish_candle = close > open_price  # 紅K
             volume_shrink = vol < vol_ma20 * 0.8  # 量縮止跌
-            kd_reversal = (k > d) and (prev_k <= prev_d) if not (pd.isna(k) or pd.isna(d) or pd.isna(prev_k) or pd.isna(prev_d)) else False  # KD 反轉
+            kd_reversal = (k > d) and (prev_k <= prev_d) if not (pd.isna(k) or pd.isna(d) or pd.isna(prev_k) or pd.isna(prev_d)) else False
             rsi_rebound = rsi_curr > 40 and rsi_curr < 60  # RSI 在合理區間反彈
             
             has_reversal_signal = bullish_candle or volume_shrink or kd_reversal or rsi_rebound
@@ -1266,19 +1608,87 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
             
             if price_above_recent_low and has_reversal_signal and price_not_below_ma60:
                 buy = True
+                watch = True
                 buy_reason_parts.append("Mode A 止跌觸發：價格 ≥ 前10日低點，出現止跌訊號，未破 MA60")
     
+    # ===== Exit 條件檢查（修正 #4）=====
+    # Exit_Defensive: Close < MA20 OR Close < MA10
+    if close < ma20:
+        exit_conditions.append("防守出場：收盤價跌破 MA20")
+    if close < ma10:
+        exit_conditions.append("防守出場：收盤價跌破 MA10")
+    
+    # Exit_Trend_End: MA20_slope < 0 OR MA20 < MA60
+    if ma20_slope < 0:
+        exit_conditions.append("趨勢結束：MA20 下彎")
+    if ma20 < ma60:
+        exit_conditions.append("趨勢結束：MA20 跌破 MA60")
+    
+    # Exit_Overheat: RSI > 80 OR KDJ High Dead Cross
+    if not pd.isna(rsi_curr) and rsi_curr > 80:
+        exit_conditions.append("過熱出場：RSI > 80")
+    if not pd.isna(k) and not pd.isna(d) and not pd.isna(prev_k) and not pd.isna(prev_d):
+        if k > 80 and d > 80 and k < d and prev_k >= prev_d:
+            exit_conditions.append("過熱出場：KDJ 高檔死叉")
+    
     # ===== 高檔乖離保護：補充 Watch 理由 =====
-    # NOTE: Buy 判斷已在上方提前過濾 is_overextended，此處僅補充 Watch 理由
     if is_overextended and watch:
         watch_reason_parts.append("（高檔乖離 > 25%，僅可觀察，不可買進）")
     
-    # ===== 強制邏輯約束 =====
-    # 絕對不允許：Buy = True 但 Watch = False（防禦性檢查）
-    if buy and not watch:
-        logger.warning("邏輯錯誤偵測: Buy=True 但 Watch=False，已強制修正 (stock data length: %d)", len(df))
-        buy = False
-        buy_reason_parts = []
+    # ===== 倉位建議（Position Sizing）=====
+    position_level = PositionLevel.NO_POSITION
+    
+    if buy:
+        if market_regime == "BULL" and strategy_mode == "Trend":
+            position_level = PositionLevel.HEAVY
+        elif market_regime == "BULL" and strategy_mode == "Pullback":
+            position_level = PositionLevel.MEDIUM
+        elif market_regime == "NEUTRAL":
+            position_level = PositionLevel.LIGHT
+        else:
+            position_level = PositionLevel.LIGHT
+        
+        # 估值警示降倉
+        if valuation_warning:
+            position_level = adjust_position_down(position_level)
+            not_buy_reasons.append("估值警示：已降低建議倉位")
+        
+        # 波動度過高降倉
+        if volatility_flag == "High":
+            position_level = adjust_position_down(position_level)
+            not_buy_reasons.append("高波動：已降低建議倉位")
+    elif watch:
+        position_level = PositionLevel.NO_POSITION  # 觀察中不建議進場
+    
+    # ===== 動態停損位計算 =====
+    stop_loss_price = None
+    stop_loss_method = None
+    risk_pct = None
+    
+    if buy and atr and not pd.isna(atr):
+        if strategy_mode == "Pullback":
+            # 回檔模式：Swing_Low - ATR * buffer_k
+            base_stop = swing_low_10 if swing_low_10 and not pd.isna(swing_low_10) else low
+            stop_loss_price = base_stop - atr * ATR_BUFFER_PULLBACK
+            stop_loss_method = "Swing_Low - ATR"
+        elif strategy_mode == "Trend":
+            # 趨勢模式：MA20 - ATR * buffer_n
+            base_stop = ma20
+            stop_loss_price = base_stop - atr * ATR_BUFFER_TREND
+            stop_loss_method = "MA20 - ATR"
+        
+        if stop_loss_price and close > 0:
+            risk_pct = (close - stop_loss_price) / close * 100
+    
+    # ===== 決定最終訊號 =====
+    if len(exit_conditions) > 0 and not buy:
+        signal = "Exit"
+    elif buy:
+        signal = "Buy"
+    elif watch:
+        signal = "Watch"
+    else:
+        signal = "NoTrade"
     
     # Confidence 計算
     confidence = 0
@@ -1290,6 +1700,8 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
         confidence += 20
     elif market_regime == "NEUTRAL":
         confidence += 10
+    if kdj_check_ok:
+        confidence += 5
     confidence = max(0, min(100, confidence))
     
     # 組合理由
@@ -1298,9 +1710,23 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
         reason_parts.extend(watch_reason_parts)
     if buy:
         reason_parts.extend(buy_reason_parts)
+    if kdj_reason and kdj_check_ok:
+        reason_parts.append(kdj_reason)
     reason = "；".join(reason_parts) if reason_parts else "不符合任何條件"
     
     return {
+        "signal": signal,
+        "mode": strategy_mode,
+        "market_regime": market_regime,
+        "position_level": position_level,
+        "entry_price": close if buy else None,
+        "stop_loss_price": round(stop_loss_price, 2) if stop_loss_price else None,
+        "atr": round(atr, 2) if atr and not pd.isna(atr) else None,
+        "stop_loss_method": stop_loss_method,
+        "risk_pct": round(risk_pct, 2) if risk_pct else None,
+        "exit_conditions": exit_conditions,
+        "not_buy_reasons": not_buy_reasons,
+        "valuation_warning": valuation_warning,
         "watch": watch,
         "buy": buy,
         "confidence": confidence,
@@ -1308,33 +1734,63 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str) -> 
     }
 
 
-def strategy_engine(df: pd.DataFrame) -> Dict:
+def strategy_engine(df: pd.DataFrame, stock_id: str = "", fundamentals: Optional[Dict[str, Any]] = None) -> Dict:
     """
     策略引擎 - 三層式架構整合
     
     Layer 1: 市場開關（Gate）- 判斷是否允許做多
     Layer 2: 策略模式選擇（Mode Selector）- 決定用哪套邏輯
-    Layer 3: 股票評估（Stock Evaluation）- 產生 Watch/Buy 訊號
+    Layer 3: 股票評估（Stock Evaluation）- 產生完整交易卡片
     
-    輸出格式（向後兼容）：
+    輸出格式（完整交易卡片）：
     {
-        "market_regime": "BULL" | "NEUTRAL" | "BEAR",
-        "mode": "Trend" | "Pullback" | "NoTrade",
+        "signal": "Buy" | "Watch" | "NoTrade" | "Exit",
+        "mode": str,
+        "market_regime": str,
+        "position_level": str,
+        "entry_price": float,
+        "stop_loss_price": float,
+        "atr": float,
+        "stop_loss_method": str,
+        "risk_pct": float,
+        "exit_conditions": List[str],
+        "not_buy_reasons": List[str],
+        "valuation_warning": bool,
         "watch": bool,
         "buy": bool,
         "confidence": int (0-100),
         "reason": str
     }
     """
+    # 預設輸出結構
+    default_output = {
+        "signal": "NoTrade",
+        "mode": "NoTrade",
+        "market_regime": "UNKNOWN",
+        "position_level": PositionLevel.NO_POSITION,
+        "entry_price": None,
+        "stop_loss_price": None,
+        "atr": None,
+        "stop_loss_method": None,
+        "risk_pct": None,
+        "exit_conditions": [],
+        "not_buy_reasons": [],
+        "valuation_warning": False,
+        "watch": False,
+        "buy": False,
+        "confidence": 0,
+        "reason": "",
+        # 向後兼容欄位
+        "regime": "UNKNOWN",
+        "status": "",
+        "reasons": [],
+    }
+    
     if df is None or df.empty or len(df) < 30:
-        return {
-            "market_regime": "UNKNOWN",
-            "mode": "NoTrade",
-            "watch": False,
-            "buy": False,
-            "confidence": 0,
-            "reason": "資料不足，無法判斷",
-        }
+        default_output["reason"] = "資料不足，無法判斷"
+        default_output["status"] = default_output["reason"]
+        default_output["reasons"] = [default_output["reason"]]
+        return default_output
     
     # Layer 1: 市場開關
     gate_result = market_regime_gate(df)
@@ -1343,17 +1799,15 @@ def strategy_engine(df: pd.DataFrame) -> Dict:
     
     if not allow_long:
         return {
+            **default_output,
             "market_regime": market_regime,
-            "mode": "NoTrade",
-            "watch": False,
-            "buy": False,
-            "confidence": 0,
             "reason": gate_result["reason"],
             # 向後兼容欄位
             "regime": market_regime,
-            "signal": "none",
+            "signal": "NoTrade",
             "status": gate_result["reason"],
             "reasons": [gate_result["reason"]],
+            "not_buy_reasons": ["空頭市場：多頭方向關閉"],
         }
     
     # Layer 2: 策略模式選擇
@@ -1362,37 +1816,51 @@ def strategy_engine(df: pd.DataFrame) -> Dict:
     
     if strategy_mode == "NoTrade":
         return {
+            **default_output,
             "market_regime": market_regime,
             "mode": "NoTrade",
-            "watch": False,
-            "buy": False,
-            "confidence": 0,
             "reason": mode_result["reason"],
             # 向後兼容欄位
             "regime": market_regime,
-            "signal": "none",
+            "signal": "NoTrade",
             "status": mode_result["reason"],
             "reasons": [mode_result["reason"]],
+            "not_buy_reasons": ["不符合交易結構"],
         }
     
-    # Layer 3: 股票評估
-    eval_result = evaluate_stock(df, market_regime, strategy_mode)
+    # Layer 3: 股票評估（傳入新參數）
+    eval_result = evaluate_stock(df, market_regime, strategy_mode, stock_id, fundamentals)
     
     # 模式名稱映射（向後兼容：Trend -> B, Pullback -> A）
     mode_display = "B" if strategy_mode == "Trend" else "A"
     
+    # 決定向後兼容的 signal 欄位
+    signal_compat = eval_result.get("signal", "NoTrade").lower()
+    if signal_compat == "notrade":
+        signal_compat = "none"
+    
     return {
-        "market_regime": market_regime,
+        # 新格式欄位
+        "signal": eval_result.get("signal", "NoTrade"),
         "mode": mode_display,  # 向後兼容：顯示 A/B
-        "watch": eval_result["watch"],
-        "buy": eval_result["buy"],
-        "confidence": eval_result["confidence"],
-        "reason": eval_result["reason"],
+        "market_regime": market_regime,
+        "position_level": eval_result.get("position_level", PositionLevel.NO_POSITION),
+        "entry_price": eval_result.get("entry_price"),
+        "stop_loss_price": eval_result.get("stop_loss_price"),
+        "atr": eval_result.get("atr"),
+        "stop_loss_method": eval_result.get("stop_loss_method"),
+        "risk_pct": eval_result.get("risk_pct"),
+        "exit_conditions": eval_result.get("exit_conditions", []),
+        "not_buy_reasons": eval_result.get("not_buy_reasons", []),
+        "valuation_warning": eval_result.get("valuation_warning", False),
+        "watch": eval_result.get("watch", False),
+        "buy": eval_result.get("buy", False),
+        "confidence": eval_result.get("confidence", 0),
+        "reason": eval_result.get("reason", ""),
         # 向後兼容欄位
         "regime": market_regime,
-        "signal": "buy" if eval_result["buy"] else ("watch" if eval_result["watch"] else "none"),
-        "status": eval_result["reason"],
-        "reasons": [eval_result["reason"]],
+        "status": eval_result.get("reason", ""),
+        "reasons": [eval_result.get("reason", "")],
     }
 
 def advanced_quant_filter(stock_id, start_date, pre_fetched_df=None):
@@ -1403,6 +1871,8 @@ def advanced_quant_filter(stock_id, start_date, pre_fetched_df=None):
     - 只負責資料準備 + 呼叫 strategy_engine
     - 所有判斷統一由 strategy_engine 輸出
     - 不再自行判斷買賣點
+    
+    輸出包含完整交易卡片欄位
     """
     try:
         ticker = yf.Ticker(stock_id)
@@ -1426,30 +1896,49 @@ def advanced_quant_filter(stock_id, start_date, pre_fetched_df=None):
         if vol_ma20 < 1000000: 
             return None  # 流動性過低，直接跳過
 
+        # 準備基本面資訊傳給策略引擎
+        pe = info.get('trailingPE', float('inf'))
+        if pe is None: 
+            pe = float('inf')
+        eps = info.get('trailingEps', 0)
+        if eps is None:
+            eps = 0
+        yoy_growth = info.get('earningsGrowth', None)
+        fundamentals = {
+            "PE": pe,
+            "EPS": eps,
+            "Growth": yoy_growth,
+        }
+
         # 使用策略引擎決定 watch / buy（唯一決策來源）
-        strat = strategy_engine(df)
+        # 傳入 stock_id 和 fundamentals 以支援新功能
+        strat = strategy_engine(df, stock_id, fundamentals)
+        
         market_regime = strat.get("market_regime", "UNKNOWN")
         mode = strat.get("mode")
+        signal = strat.get("signal", "NoTrade")
         watch = bool(strat.get("watch", False))
         buy = bool(strat.get("buy", False))
         confidence = strat.get("confidence", 0)
         reason = strat.get("reason", "")
+        position_level = strat.get("position_level", PositionLevel.NO_POSITION)
+        stop_loss_price = strat.get("stop_loss_price")
+        atr = strat.get("atr")
+        stop_loss_method = strat.get("stop_loss_method")
+        risk_pct = strat.get("risk_pct")
+        exit_conditions = strat.get("exit_conditions", [])
+        not_buy_reasons = strat.get("not_buy_reasons", [])
+        valuation_warning = strat.get("valuation_warning", False)
 
-        # 狀態文字完全根據 watch / buy
-        if buy:
+        # 狀態文字根據 signal
+        if signal == "Buy":
             status = "✅ Buy"
-        elif watch:
+        elif signal == "Watch":
             status = "👀 Watch"
+        elif signal == "Exit":
+            status = "🚪 Exit"
         else:
             status = "觀望"
-
-        # 基本面資訊（僅供參考，不影響決策）
-        pe = info.get('trailingPE', float('inf'))
-        if pe is None: 
-            pe = float('inf')
-        peg = info.get('pegRatio', float('inf'))
-        if peg is None: 
-            peg = float('inf')
 
         return {
             "id": stock_id,
@@ -1463,6 +1952,16 @@ def advanced_quant_filter(stock_id, start_date, pre_fetched_df=None):
             "market_regime": market_regime,
             "mode": mode,
             "confidence": confidence,
+            # 新增欄位
+            "signal": signal,
+            "position_level": position_level,
+            "stop_loss_price": stop_loss_price,
+            "atr": atr,
+            "stop_loss_method": stop_loss_method,
+            "risk_pct": risk_pct,
+            "exit_conditions": exit_conditions,
+            "not_buy_reasons": not_buy_reasons,
+            "valuation_warning": valuation_warning,
         }
     except Exception as e:
         logger.debug("advanced_quant_filter error for %s: %s", stock_id, e)
@@ -1544,40 +2043,61 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     curr = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # 🧠 策略引擎總結區塊（Regime + Mode + Watch/Buy）
+    # 🧠 策略引擎總結區塊（傳入完整參數以支援新功能）
     try:
-        engine = strategy_engine(df)
-    except Exception:
+        engine = strategy_engine(df, stock_id, fundamentals)
+    except Exception as e:
+        logger.debug("strategy_engine error: %s", e)
         engine = {
+            "signal": "NoTrade",
             "market_regime": "UNKNOWN",
             "mode": None,
             "watch": False,
             "buy": False,
             "confidence": 0,
             "reason": "資料不足或計算失敗",
+            "position_level": PositionLevel.NO_POSITION,
+            "stop_loss_price": None,
+            "atr": None,
+            "stop_loss_method": None,
+            "risk_pct": None,
+            "exit_conditions": [],
+            "not_buy_reasons": [],
+            "valuation_warning": False,
         }
 
+    # 提取所有欄位
+    signal = engine.get("signal", "NoTrade")
     market_regime = engine.get("market_regime", "UNKNOWN")
     mode = engine.get("mode")
     watch = engine.get("watch", False)
     buy = engine.get("buy", False)
     confidence = engine.get("confidence", 0)
     reason = engine.get("reason", "")
+    position_level = engine.get("position_level", PositionLevel.NO_POSITION)
+    stop_loss_price = engine.get("stop_loss_price")
+    atr = engine.get("atr")
+    stop_loss_method = engine.get("stop_loss_method")
+    risk_pct = engine.get("risk_pct")
+    exit_conditions = engine.get("exit_conditions", [])
+    not_buy_reasons = engine.get("not_buy_reasons", [])
+    valuation_warning = engine.get("valuation_warning", False)
 
-    st.subheader("🧠 策略引擎判斷 (Market Regime & Mode & Watch/Buy)")
+    st.subheader("🧠 策略引擎判斷 (完整交易卡片)")
     
     # 左側：主要決策卡片
     col_main, col_detail = st.columns([2, 3])
     with col_main:
-        if buy:
+        if signal == "Buy":
             st.success(f"""
             **✅ Buy 訊號觸發**
             
             信心度：{confidence}%  
-            Mode：{mode}
+            Mode：{mode}  
+            建議倉位：{position_level}
             """)
             st.caption("條件完整，可執行交易")
-        elif watch:
+        elif signal == "Watch":
             st.warning(f"""
             **👀 Watchlist 觀察中**
             
@@ -1585,6 +2105,14 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
             Mode：{mode}
             """)
             st.caption("值得盯，但尚未觸發買點")
+        elif signal == "Exit":
+            st.error(f"""
+            **🚪 Exit 出場訊號**
+            
+            信心度：{confidence}%  
+            Mode：{mode}
+            """)
+            st.caption("建議考慮出場或減碼")
         else:
             st.info("""
             **目前無明確進場設定**
@@ -1630,11 +2158,58 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
             else:
                 st.markdown("**Buy**：❌ 否")
         
+        # 估值警示
+        if valuation_warning:
+            st.warning("⚠️ 估值警示：EPS 偏高或 PE 昂貴")
+        
         # 理由說明
         if reason:
             st.markdown("---")
             st.markdown(f"**判斷理由**：")
             st.caption(reason)
+    
+    # ===== 📋 完整交易卡片區塊 =====
+    if buy or signal == "Buy":
+        st.markdown("### 📋 交易執行卡片")
+        col_card1, col_card2, col_card3 = st.columns(3)
+        
+        with col_card1:
+            st.metric("建議倉位", position_level)
+            if atr:
+                st.metric("ATR (14)", f"{atr:.2f}")
+        
+        with col_card2:
+            entry_price = engine.get("entry_price", curr['Close'])
+            if entry_price:
+                st.metric("參考進場價", f"${entry_price:.2f}")
+            if stop_loss_price:
+                st.metric("停損價", f"${stop_loss_price:.2f}")
+        
+        with col_card3:
+            if risk_pct:
+                st.metric("風險 %", f"{risk_pct:.2f}%")
+            if stop_loss_method:
+                st.caption(f"停損方法：{stop_loss_method}")
+        
+        st.markdown("---")
+    
+    # ===== 🚪 出場條件區塊 =====
+    if exit_conditions:
+        st.markdown("### 🚪 出場條件提醒")
+        for cond in exit_conditions:
+            if "過熱" in cond:
+                st.error(f"🔥 {cond}")
+            elif "趨勢結束" in cond:
+                st.warning(f"⚠️ {cond}")
+            else:
+                st.info(f"📉 {cond}")
+        st.markdown("---")
+    
+    # ===== ❌ 不買入原因區塊（僅在非 Buy 時顯示）=====
+    if not_buy_reasons and not buy:
+        with st.expander("❌ 不買入原因", expanded=False):
+            for reason_item in not_buy_reasons:
+                st.caption(f"• {reason_item}")
     
     st.markdown("---")
 
@@ -1719,7 +2294,8 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
                 st.warning("⚠️ 查無外資數據 (盤中可能尚未更新)")
             else:
                 c_color = COLOR_UP if last_chip['Net_Buy'] > 0 else COLOR_DOWN
-                st.markdown(f"**最新外資買賣超**: :{c_color}[{last_chip['Net_Buy']:.0f} 張]")
+                net_buy_val = last_chip['Net_Buy']
+                st.markdown(f"**最新外資買賣超**: <span style='color:{c_color};font-weight:bold;'>{net_buy_val:.0f} 張</span>", unsafe_allow_html=True)
                 
                 recent_5_days = aligned_chips['Net_Buy'].tail(5).sum()
                 chip_status = "外資連買" if recent_5_days > 0 else "外資調節"
