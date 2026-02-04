@@ -2784,13 +2784,6 @@ def clear_temp_data():
         st.session_state.pop(k, None)
 
 
-# 手續費折扣設定
-fee_discount_input = st.sidebar.slider(
-    "手續費折扣 (10折 = 1.0)",
-    min_value=0.1, max_value=1.0, value=0.6, step=0.05,
-    help="台灣大部分券商網路下單約 6 折或更低。2.8 折則設為 0.28。"
-)
-
 # 預設為一個月前
 default_start_date = pd.Timestamp.today() - pd.DateOffset(months=1)
 start_date = st.sidebar.date_input(
@@ -3336,8 +3329,8 @@ elif mode == "📦 我持有的股票診斷":
             qty = int(h.get('qty', 0))
             latest = get_latest_price(code) or 0.0
             
-            # 使用統一函式計算
-            log = calculate_tradelog(code, buy_price, latest, qty, fee_discount=fee_discount_input)
+            # 使用統一函式計算（預設 6 折手續費）
+            log = calculate_tradelog(code, buy_price, latest, qty)
             total_cost = log['total_cost']
             net_value = log['net_value']
             unreal = log['unrealized_profit']
@@ -3478,7 +3471,7 @@ elif mode == "📦 我持有的股票診斷":
                                 latest_p = get_latest_price(selected.get('code')) or 0.0
                                 
                                 # 使用統一函式計算
-                                log_p = calculate_tradelog(selected.get('code'), buy_p, latest_p, qty_p, fee_discount=fee_discount_input)
+                                log_p = calculate_tradelog(selected.get('code'), buy_p, latest_p, qty_p)
                                 unreal_p = log_p['unrealized_profit']
                                 pct_p = log_p['profit_pct']
                                 
@@ -3584,7 +3577,7 @@ elif mode == "📦 我持有的股票診斷":
             code = h.get('code', '')
             
             # 使用統一函式計算歷史損益
-            log = calculate_tradelog(code, b_p, s_p, q, fee_discount=fee_discount_input)
+            log = calculate_tradelog(code, b_p, s_p, q)
             realized_net = log['unrealized_profit']
             total_realized_net += realized_net
             
