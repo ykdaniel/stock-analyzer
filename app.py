@@ -1480,30 +1480,39 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str,
     exit_conditions = []
     
     # ===== KDJ 規則依 Mode 切換（修正 #3）=====
+    # NOTE: KDJ 是「建議性條件」，不會完全阻擋 Buy，但會影響信心度
     kdj_check_ok = True
+    kdj_ideal = False  # 理想的 KDJ 條件
     kdj_reason = ""
     
     if strategy_mode == "Pullback":
-        # 回檔模式：D <= 40 AND K >= D（低檔買入）
+        # 回檔模式：理想條件是 D <= 40 AND K >= D（低檔買入）
         if not pd.isna(k) and not pd.isna(d):
             if d <= 40 and k >= d:
-                kdj_check_ok = True
+                kdj_ideal = True
                 kdj_reason = "KDJ 符合回檔買入條件（D <= 40, K >= D）"
-            elif d > 40:
-                kdj_check_ok = False
-                kdj_reason = f"KDJ D 值過高（{d:.1f} > 40），非低檔區"
+            elif d <= 50 and k >= d:
+                # 次佳條件：D 在 50 以下且 K > D，仍可考慮
+                kdj_ideal = False
+                kdj_reason = f"KDJ 尚可（D={d:.1f}，K >= D），非最佳時機"
+            elif d > 50:
+                # 高檔區不適合回檔買入，但不硬性阻擋
+                kdj_ideal = False
+                kdj_reason = f"KDJ D 值偏高（{d:.1f}），回檔買入風險較高"
             else:
-                kdj_check_ok = False
-                kdj_reason = f"KDJ K < D（{k:.1f} < {d:.1f}），未出現金叉"
+                kdj_ideal = False
+                kdj_reason = f"KDJ K < D（{k:.1f} < {d:.1f}），尚未金叉"
     elif strategy_mode == "Trend":
-        # 趨勢模式：NOT (K < D AND D falling)（避免高檔死叉）
+        # 趨勢模式：避免高檔死叉（K < D AND D falling）
         if not pd.isna(k) and not pd.isna(d) and not pd.isna(prev_d):
             d_falling = d < prev_d
             if k < d and d_falling:
+                # 高檔死叉是明確的賣出訊號，應該阻擋 Buy
                 kdj_check_ok = False
                 kdj_reason = f"KDJ 高檔死叉（K:{k:.1f} < D:{d:.1f}，D 下滑）"
             else:
                 kdj_check_ok = True
+                kdj_ideal = True
                 kdj_reason = "KDJ 未出現高檔死叉"
     
     # ===== Watch 判定：結構成立，但尚未出現低風險進場點 =====
@@ -1612,19 +1621,24 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str,
                 buy_reason_parts.append("Mode A 止跌觸發：價格 ≥ 前10日低點，出現止跌訊號，未破 MA60")
     
     # ===== Exit 條件檢查（修正 #4）=====
-    # Exit_Defensive: Close < MA20 OR Close < MA10
-    if close < ma20:
-        exit_conditions.append("防守出場：收盤價跌破 MA20")
-    if close < ma10:
-        exit_conditions.append("防守出場：收盤價跌破 MA10")
+    # NOTE: Exit 條件是給「已持有部位」的參考，不影響 Buy 判斷
+    # 只有在 Trend 模式或已經 Watch 的情況下才檢查防守出場
     
-    # Exit_Trend_End: MA20_slope < 0 OR MA20 < MA60
-    if ma20_slope < 0:
+    # Exit_Defensive: 僅對 Trend 模式檢查（Pullback 本來就在低檔）
+    if strategy_mode == "Trend":
+        if close < ma20:
+            exit_conditions.append("防守出場：收盤價跌破 MA20")
+        if close < ma10:
+            exit_conditions.append("防守出場：收盤價跌破 MA10")
+    
+    # Exit_Trend_End: 趨勢結構破壞（對所有模式都重要）
+    if ma20_slope < 0 and strategy_mode == "Trend":
         exit_conditions.append("趨勢結束：MA20 下彎")
-    if ma20 < ma60:
-        exit_conditions.append("趨勢結束：MA20 跌破 MA60")
+    if ma20 < ma60 and close < ma60:
+        # 只有當 MA20 和價格都跌破 MA60 時才算趨勢結束
+        exit_conditions.append("趨勢結束：MA20 跌破 MA60 且價格破季線")
     
-    # Exit_Overheat: RSI > 80 OR KDJ High Dead Cross
+    # Exit_Overheat: RSI > 80 OR KDJ 高檔死叉（對所有模式都適用）
     if not pd.isna(rsi_curr) and rsi_curr > 80:
         exit_conditions.append("過熱出場：RSI > 80")
     if not pd.isna(k) and not pd.isna(d) and not pd.isna(prev_k) and not pd.isna(prev_d):
@@ -1700,8 +1714,13 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str,
         confidence += 20
     elif market_regime == "NEUTRAL":
         confidence += 10
-    if kdj_check_ok:
-        confidence += 5
+    # KDJ 條件對信心度的影響
+    if kdj_ideal:
+        confidence += 10  # 理想 KDJ 條件加分
+    elif kdj_check_ok:
+        confidence += 5   # KDJ 可接受
+    else:
+        confidence -= 10  # KDJ 不佳扣分
     confidence = max(0, min(100, confidence))
     
     # 組合理由
@@ -1710,7 +1729,8 @@ def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str,
         reason_parts.extend(watch_reason_parts)
     if buy:
         reason_parts.extend(buy_reason_parts)
-    if kdj_reason and kdj_check_ok:
+    # 顯示 KDJ 理由（無論條件是否理想）
+    if kdj_reason:
         reason_parts.append(kdj_reason)
     reason = "；".join(reason_parts) if reason_parts else "不符合任何條件"
     
