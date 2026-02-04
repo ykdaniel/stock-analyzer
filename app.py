@@ -593,7 +593,7 @@ def apply_table_style(df):
     format_dict = {}
     
     # (A) 金額與股數：整數顯示
-    amount_cols = ['股數', '成本(含費)', '市值(扣費)', '未實現損益(元)', '已實現淨損益', '成交量', '量能']
+    amount_cols = ['股數', '成本(含費)', '市值(扣費)', '未實現損益(元)', '已實現淨損益', '成交量', '量能', '前日買賣超', '今日買賣超']
     for col in amount_cols:
         if col in df.columns:
             format_dict[col] = "{:,.0f}"
@@ -2727,6 +2727,12 @@ def render_chip_history_table(stock_id: str):
         st.info("外資轉向紀錄格式異常，暫時無法顯示列表。")
         return
     df_render = df_show[available_cols].reset_index(drop=True)
+    
+    # 將表頭改為中文
+    df_render.columns = [
+        {'stock_id':'股票代號', 'kind':'轉向類型', 'prev':'前日買賣超', 'last':'今日買賣超', 'date':'日期', 'summary':'摘要說明'}.get(c, c) 
+        for c in df_render.columns
+    ]
 
     st.dataframe(apply_table_style(df_render).hide(axis='index'), use_container_width=True)
 
