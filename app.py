@@ -55,6 +55,7 @@ import os
 import re
 import json
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -3345,7 +3346,6 @@ elif mode == "📦 我持有的股票診斷":
             tax_rate = TAX_RATE_ETF if is_etf else TAX_RATE_STOCK
             
             # 買入手續費 (無條件進位，最低 20 元)
-            import math
             buy_fee_raw = raw_cost * FEE_RATE
             buy_fee = max(MIN_FEE, math.ceil(buy_fee_raw)) if buy_fee_raw > 0 else 0
             
