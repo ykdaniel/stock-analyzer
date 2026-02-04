@@ -3713,6 +3713,59 @@ elif mode == "📦 我持有的股票診斷":
                 st.success('已刪除該歷史紀錄')
                 st.rerun()
 
+    st.markdown('---')
+    st.subheader("💾 資料備份與還原")
+    st.info("如果您是在 Streamlit Cloud (網頁版) 使用，系統重啟後資料會重置。請定期點選「下載備份」保存您的資料，需要時再「上傳還原」。")
+    
+    with st.expander("📤 匯出資料 (下載備份)", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                label="下載最新持股 (holdings.json)",
+                data=json.dumps(st.session_state['holdings'], ensure_ascii=False, indent=2),
+                file_name="holdings.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        with c2:
+            st.download_button(
+                label="下載歷史紀錄 (history.json)",
+                data=json.dumps(st.session_state['history'], ensure_ascii=False, indent=2),
+                file_name="history.json",
+                mime="application/json",
+                use_container_width=True
+            )
+
+    with st.expander("📥 匯入資料 (上傳還原)", expanded=False):
+        u_col1, u_col2 = st.columns(2)
+        with u_col1:
+            u_holdings = st.file_uploader("上傳 holdings.json", type=['json'])
+            if u_holdings is not None:
+                try:
+                    data = json.load(u_holdings)
+                    if isinstance(data, list):
+                        st.session_state['holdings'] = data
+                        save_json(HOLDINGS_FILE, data)
+                        st.success("成功載入持股資料！")
+                    else:
+                        st.error("格式錯誤：必須是列表 (List)")
+                except Exception as e:
+                    st.error(f"讀取失敗: {e}")
+        
+        with u_col2:
+            u_history = st.file_uploader("上傳 history.json", type=['json'])
+            if u_history is not None:
+                try:
+                    data = json.load(u_history)
+                    if isinstance(data, list):
+                        st.session_state['history'] = data
+                        save_json(HISTORY_FILE, data)
+                        st.success("成功載入歷史資料！")
+                    else:
+                        st.error("格式錯誤：必須是列表 (List)")
+                except Exception as e:
+                    st.error(f"讀取失敗: {e}")
+
 # ----------------- 頁面 D：觀察清單 -----------------
 elif mode == "⭐ 觀察清單":
     st.header("⭐ 觀察清單")
