@@ -26,5 +26,19 @@
     "buy_price": 71.1,
     "qty": 1000,
     "note": ""
+  },
+  {
+    "code": "2330.TW",
+    "buy_date": "2026-02-04",
+    "buy_price": 1800.0,
+    "qty": 80,
+    "note": ""
+  },
+  {
+    "code": "3017.TW",
+    "buy_date": "2026-02-04",
+    "buy_price": 1705.0,
+    "qty": 50,
+    "note": ""
   }
 ]

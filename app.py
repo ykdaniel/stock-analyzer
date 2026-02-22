@@ -43,6 +43,15 @@ AI 量化戰情室 - 台股分析系統
   2026-01-24: 移除 6 個重複函數定義，語法驗證通過
 """
 
+
+from core.constants import SectorType, PositionLevel, POSITION_ORDER, PE_EXPENSIVE_THRESHOLD, PE_REASONABLE_BASE, PE_GROWTH_MULTIPLIER, SECTOR_LIST, STOCK_DB
+from core.models import ValuationRequest, RiskAssessment, StrategySignal
+from repository.market_data_repo import MarketDataRepository
+from services.valuation_service import ValuationService
+from services.risk_service import RiskService
+from services.strategy_engine import StrategyEngine
+from services.fund_flow_service import FundFlowService
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -82,7 +91,6 @@ COLOR_DOWN = '#00D964'  # 鮮豔綠 (下跌)
 # ==========================================
 # NOTE: ATR 是「尺度」，用於計算停損緩衝，不是「結構」判斷依據
 
-ATR_CACHE: Dict[tuple, float] = {}  # key: (symbol, date_str)
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
@@ -132,7 +140,6 @@ def get_atr(symbol: str, df: pd.DataFrame, date: Any = None) -> Optional[float]:
     
     if cache_key in ATR_CACHE:
         return ATR_CACHE[cache_key]
-    
     atr_series = calculate_atr(df)
     if atr_series.empty:
         return None
@@ -230,59 +237,9 @@ def get_reasonable_pe(yoy_growth: Optional[float]) -> float:
     return PE_REASONABLE_BASE
 
 
-def get_valuation_status(pe: Optional[float], eps: Optional[float], yoy_growth: Optional[float]) -> Dict[str, Any]:
-    """
-    動態估值判斷
-    
-    回傳：
-    {
-        "status": "cheap" | "reasonable" | "expensive",
-        "warning": bool,
-        "reason": str,
-        "reasonable_pe": float
-    }
-    """
-    result = {
-        "status": "reasonable",
-        "warning": False,
-        "reason": "",
-        "reasonable_pe": PE_REASONABLE_BASE,
-    }
-    
-    if pe is None or pe == float('inf'):
-        result["status"] = "unknown"
-        result["reason"] = "無法取得 PE 資料"
-        return result
-    
-    reasonable_pe = get_reasonable_pe(yoy_growth)
-    result["reasonable_pe"] = reasonable_pe
-    
-    # PE > 40 一律昂貴
-    if pe > PE_EXPENSIVE_THRESHOLD:
-        result["status"] = "expensive"
-        result["warning"] = True
-        result["reason"] = f"PE ({pe:.1f}) > {PE_EXPENSIVE_THRESHOLD}，估值昂貴"
-        return result
-    
-    # EPS 高位警示
-    if eps is not None and eps > EPS_HIGH_THRESHOLD:
-        if yoy_growth is None or yoy_growth < YOY_GROWTH_THRESHOLD:
-            result["warning"] = True
-            result["reason"] = f"EPS ({eps:.2f}) > {EPS_HIGH_THRESHOLD} 但成長率不足 {YOY_GROWTH_THRESHOLD*100:.0f}%，估值偏高警示"
-    
-    # 根據合理 PE 判斷
-    if pe < reasonable_pe * 0.7:
-        result["status"] = "cheap"
-        result["reason"] = f"PE ({pe:.1f}) < 合理倍數的 70%，估值便宜"
-    elif pe > reasonable_pe:
-        result["status"] = "expensive"
-        if not result["warning"]:
-            result["reason"] = f"PE ({pe:.1f}) > 合理倍數 ({reasonable_pe})，估值偏高"
-    else:
-        result["reason"] = f"PE ({pe:.1f}) 在合理範圍內"
-    
-    return result
-
+def get_valuation_status(pe: Optional[float], eps: Optional[float], yoy_growth: Optional[float]) -> dict:
+    resp = ValuationService.get_valuation_status(ValuationRequest(pe=pe, eps=eps, yoy_growth=yoy_growth))
+    return {"status": resp.status, "warning": resp.warning, "reason": resp.reason, "reasonable_pe": resp.reasonable_pe}
 
 # --- 全域 CSS 樣式 ---
 st.markdown("""
@@ -314,48 +271,7 @@ st.markdown("""
 
 # --- 損益計算工具 ---
 def calculate_tradelog(code, buy_price, current_price, qty, fee_discount=1.0):
-    """
-    計算交易損益與費用（統一邏輯）
-    :param fee_discount: 手續費折扣 (預設 1.0 = 無折扣，依使用者券商實況調整)
-    """
-    raw_cost = buy_price * qty
-    raw_value = current_price * qty
-    
-    # 常數設定
-    FEE_RATE = 0.001425
-    TAX_RATE_STOCK = 0.003
-    TAX_RATE_ETF = 0.001
-    MIN_FEE = 20
-    
-    # 判斷是否為 ETF
-    # code 可能帶有 .TW 或 .TWO
-    code_num = str(code).upper().replace('.TW', '').replace('.TWO', '')
-    is_etf = code_num.startswith('00') and len(code_num) <= 6
-    tax_rate = TAX_RATE_ETF if is_etf else TAX_RATE_STOCK
-    
-    # 買入手續費 (使用 int 截斷，符合使用者券商邏輯)
-    buy_fee_raw = raw_cost * FEE_RATE * fee_discount
-    buy_fee = max(MIN_FEE, int(buy_fee_raw)) if buy_fee_raw > 0 else 0
-    total_cost = raw_cost + buy_fee
-    
-    # 賣出預估費用 (手續費 + 證交稅)
-    sell_fee_raw = raw_value * FEE_RATE * fee_discount
-    sell_fee = max(MIN_FEE, int(sell_fee_raw)) if sell_fee_raw > 0 else 0
-    sell_tax = int(raw_value * tax_rate)
-    
-    net_value = raw_value - sell_fee - sell_tax
-    unrealized_profit = net_value - total_cost
-    profit_pct = (unrealized_profit / total_cost * 100) if total_cost != 0 else 0.0
-    
-    return {
-        'total_cost': total_cost,
-        'net_value': net_value,
-        'unrealized_profit': unrealized_profit,
-        'profit_pct': profit_pct,
-        'buy_fee': buy_fee,
-        'sell_fee': sell_fee,
-        'sell_tax': sell_tax
-    }
+    return StrategyEngine.calculate_tradelog(code, buy_price, current_price, qty, fee_discount)
 
 # ==========================================
 # 1. 資料庫定義 (SSOT)
@@ -2806,7 +2722,7 @@ if 'scan_results_ai_concept' not in st.session_state: st.session_state['scan_res
 if 'watchlist' not in st.session_state:
     st.session_state['watchlist'] = load_watchlist()
 
-page_options = ["🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
+page_options = ["🌊 市場資金流向 (法人單日板塊)", "🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
 
 def update_nav(): st.session_state['current_page'] = st.session_state['nav_radio']
 try: nav_index = page_options.index(st.session_state['current_page'])
@@ -2845,6 +2761,71 @@ if prev_start is None or pd.to_datetime(prev_start) != pd.to_datetime(start_date
 
 st.session_state['analysis_start_date'] = pd.to_datetime(start_date)
 mode = st.session_state['current_page']
+
+# ----------------- 頁面: 市場資金流向 -----------------
+if mode == "🌊 市場資金流向 (法人單日板塊)":
+    st.header("🌊 市場資金流向 (法人單日板塊)")
+    st.markdown("追蹤最近一個交易日，三大法人（外資、投信、自營商）淨流入/流出的熱點族群。")
+    
+    if st.button("📊 載入資金流向資料", type="primary"):
+        with st.spinner("正在取得 FinMind 法人買賣超資料..."):
+            reports = FundFlowService.get_sector_fund_flow_report()
+            latest_date = FundFlowService.get_latest_date_available()
+            
+            if not reports:
+                st.warning(f"無法取得 {latest_date} 的法人買賣超資料，可能是 API 限制或當日無資料。")
+            else:
+                st.success(f"資料日期：{latest_date} (更新成功)")
+                
+                # 準備繪圖資料：取前 15 大淨流入與前 5 大淨流出 (或全部)
+                df_plot = pd.DataFrame([
+                    {"板塊": r.sector_name, "淨流入(元)": r.total_net_flow}
+                    for r in reports
+                ])
+                
+                # 著色：大於 0 為紅，小於 0 為綠 (台股習慣)
+                df_plot['顏色'] = df_plot['淨流入(元)'].apply(lambda x: COLOR_UP if x > 0 else COLOR_DOWN)
+                
+                fig = go.Figure(go.Bar(
+                    x=df_plot['淨流入(元)'],
+                    y=df_plot['板塊'],
+                    orientation='h',
+                    marker_color=df_plot['顏色'],
+                    text=df_plot['淨流入(元)'].apply(lambda x: f"{x:,.0f}"),
+                    textposition='auto'
+                ))
+                
+                fig.update_layout(
+                    title=f"三大法人單日淨買賣超 (依板塊) - {latest_date}",
+                    xaxis_title="淨買賣超金額 (單位: 元)",
+                    yaxis_title="產業板塊",
+                    yaxis={'categoryorder':'total ascending'}, # 讓最多的在最上面
+                    height=max(600, len(df_plot) * 30),
+                    template="plotly_white"
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.markdown("### 🏆 各板塊領頭羊 (淨買超榜)")
+                
+                col1, col2, col3 = st.columns(3)
+                cols = [col1, col2, col3]
+                
+                # 只顯示淨流入大於 0 的前幾個板塊
+                print_idx = 0
+                for r in reports:
+                    if r.total_net_flow <= 0: continue
+                    if print_idx >= 6: break # 只顯示前 6 大板塊的明細
+                    
+                    with cols[print_idx % 3]:
+                        st.markdown(f"**{r.sector_name}**")
+                        st.caption(f"總流入: {r.total_net_flow:,.0f}")
+                        # 列出該板塊前 3 大買超股
+                        top_3 = r.details[:3]
+                        for d in top_3:
+                            if d.net_buy_sell > 0:
+                                st.write(f"- {d.name} ({d.code}): {d.net_buy_sell:,.0f}")
+                    print_idx += 1
 
 # ----------------- 頁面 A -----------------
 if mode == "🏆 台灣50 (排除金融)":
