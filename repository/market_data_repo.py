@@ -1,8 +1,7 @@
 # repository/market_data_repo.py
 import yfinance as yf
 import pandas as pd
-from typing import Optional, Tuple
-from core.models import ValuationRequest
+from typing import Optional
 from core.constants import STOCK_DB
 import datetime
 
@@ -37,40 +36,4 @@ class MarketDataRepository:
             clean += ".TW"
         return clean
 
-    @staticmethod
-    def fetch_technical_data(symbol: str, period_days: int = 365) -> Optional[pd.DataFrame]:
-        """
-        獲取日線技術資料
-        返回的 df 必須確保包含 Open, High, Low, Close, Volume 欄位
-        """
-        start_date = (datetime.date.today() - datetime.timedelta(days=period_days)).isoformat()
-        try:
-            df = TechProvider.fetch_data(symbol, start_date)
-            if df is None or df.empty:
-                return None
-            return df
-        except Exception:
-            # 發生網路錯誤或 API 故障時防呆
-            return None
 
-    @staticmethod
-    def fetch_valuation_data(symbol: str) -> ValuationRequest:
-        """
-        獲取基本面估值資料，統一回傳 Pydantic Model 確保型別正確
-        缺漏資料預設為 None
-        """
-        try:
-            fun_data = FundamentalProvider.fetch_data(symbol)
-            if not fun_data:
-                 return ValuationRequest(pe=None, eps=None, yoy_growth=None)
-            
-            # 從 FinMind 回傳的資料結構中抽取
-            # 假設結構：{'pe': float, 'eps': float, 'revenue_yoy': float} 
-            # 這裡簡化對應，實際依 FundamentalProvider 實作為準
-            return ValuationRequest(
-                pe=fun_data.get('pe'),
-                eps=fun_data.get('eps'),
-                yoy_growth=fun_data.get('revenue_yoy')
-            )
-        except Exception:
-            return ValuationRequest(pe=None, eps=None, yoy_growth=None)

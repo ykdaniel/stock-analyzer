@@ -11,7 +11,7 @@ class StrategyEngine:
     """核心選股與策略引擎"""
     
     @staticmethod
-    def advanced_quant_filter(symbol: str, df: pd.DataFrame, valuation_req: ValuationRequest) -> Optional[StrategySignal]:
+    def advanced_quant_filter(df: pd.DataFrame, valuation_req: ValuationRequest) -> Optional[StrategySignal]:
         """
         改良版量化濾網 (AI Quant Filter V2)
         將原本 app.py 內建的龐大計算邏輯抽離。
@@ -45,30 +45,67 @@ class StrategyEngine:
             # --- 2. 風險評估 ---
             risk_assess = RiskService.evaluate_risk(df, close)
             
-            # --- 3. 趨勢與型態判定 ---
+            # --- 3. 趨勢、型態與 KDJ 判定 ---
             trend_up = close > ma20 and ma20 > ma50
             volume_burst = volume > df['Volume'].rolling(window=5).mean().iloc[-1] * 1.5
+            
+            k_curr = latest.get('K', 50)
+            d_curr = latest.get('D', 50)
+            k_prev = prev.get('K', 50)
+            d_prev = prev.get('D', 50)
+            
+            kdj_golden_cross = (k_curr > d_curr) and (k_prev <= d_prev)
+            kdj_death_cross = (k_curr < d_curr) and (k_prev >= d_prev)
             
             signal_type = "WAIT"
             mode = "Neutral"
             reasons = []
             
+            # KDJ 狀態解析
+            kdj_msg = ""
+            if kdj_golden_cross and d_curr <= 35:
+                kdj_msg = "KDJ 低檔黃金交叉 (K<35)，醞釀短線反彈"
+            elif kdj_death_cross and d_curr >= 75:
+                kdj_msg = "KDJ 高檔死亡交叉 (K>75)，動能轉弱，需提防回檔"
+            elif k_curr >= 80:
+                kdj_msg = "KDJ 高檔超買 (K>80)，指標過熱，應避免追高"
+            elif k_curr <= 20:
+                kdj_msg = "KDJ 低檔超賣 (K<20)，指標進入打底區或鈍化"
+            else:
+                if k_curr > d_curr:
+                    kdj_msg = f"KDJ 黃金交叉發散中 (K={k_curr:.1f}, D={d_curr:.1f})"
+                else:
+                    kdj_msg = f"KDJ 死亡交叉收斂中 (K={k_curr:.1f}, D={d_curr:.1f})"
+            reasons.append(f"KDJ狀態: {kdj_msg}")
+            
+            # 綜合判定 (趨勢 + KDJ + 量能)
             if trend_up:
                 mode = "Trend Following"
-                if volume_burst:
+                if volume_burst and k_curr < 80:
                     signal_type = "BUY"
-                    reasons.append("價量齊揚，突破均線糾結")
+                    reasons.append("價量齊揚，突破均線糾結，且無過熱現象")
+                elif volume_burst and k_curr >= 80:
+                    signal_type = "HOLD"
+                    reasons.append("價量齊揚，但指標已過熱，暫緩追高")
                 else:
                     signal_type = "HOLD"
                     reasons.append("多頭排列，但量能未放大")
             elif close < ma50:
                 mode = "Bearish"
-                signal_type = "WAIT"
-                reasons.append("股價跌破季線，趨勢偏空")
+                if kdj_golden_cross and d_curr <= 35:
+                    signal_type = "HOLD" # 以 HOLD 表示觀察中
+                    reasons.append("股價位於季線下，但 KDJ 低檔黃金交叉，有機會發動跌深反彈")
+                else:
+                    signal_type = "WAIT"
+                    reasons.append("股價跌破季線，趨勢偏空")
             else:
                 mode = "Stock Picking"
-                signal_type = "WAIT"
-                reasons.append("區間震盪，無明顯趨勢")
+                if kdj_golden_cross and d_curr <= 35:
+                    signal_type = "HOLD"
+                    reasons.append("區間震盪，KDJ 低檔出現買進訊號，可嘗試分批佈局")
+                else:
+                    signal_type = "WAIT"
+                    reasons.append("區間震盪，無明顯趨勢")
                 
             # 若 ATR 波動過大，覆寫買進訊號
             if risk_assess.volatility_flag == "Extreme" and signal_type == "BUY":

@@ -34,29 +34,7 @@ class StrategySignal(BaseModel):
     reasons: List[str] = Field(default_factory=list)
     valuation_warning: bool = False
     
-class TradeLogRequest(BaseModel):
-    model_config = ConfigDict(strict=True)
-    code: str
-    buy_price: float
-    current_price: float
-    qty: int
-    fee_discount: float = 1.0
 
-class TradeLogResponse(BaseModel):
-    code: str
-    buy_price: float
-    current_price: float
-    qty: int
-    cost_basis: int
-    market_value: int
-    raw_profit: int
-    buy_fee: int
-    sell_fee: int
-    tax: int
-    total_cost: int
-    net_profit: int
-    roi_pct: float
-    status: str # "Win" or "Loss"
 
 class FundFlowDetail(BaseModel):
     code: str

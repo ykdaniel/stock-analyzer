@@ -26,10 +26,7 @@ wheels/
 # Streamlit
 .streamlit/secrets.toml
 
-# Data files (不上傳用戶資料)
-holdings.json
-history.json
-watchlist.json
+# Data files
 *.csv
 *.xlsx
 
