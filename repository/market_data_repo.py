@@ -15,23 +15,44 @@ class MarketDataRepository:
     def get_stock_display_name(code: str) -> str:
         """取得股票顯示名稱（優先中文）"""
         clean_code = code.replace(".TW", "").replace(".tw", "")
+        ticker_tw = f"{clean_code}.TW"
+        
         # 1. 查本地 STOCK_DB
-        info = STOCK_DB.get(clean_code)
+        info = STOCK_DB.get(ticker_tw)
         if info:
-            return f"{clean_code} {info['name']}"
+            return info['name']
         
         # 2. 回退到 yfinance 查詢
         try:
-            ticker = yf.Ticker(f"{clean_code}.TW")
+            ticker = yf.Ticker(ticker_tw)
             name = ticker.info.get("shortName", clean_code)
-            return f"{clean_code} {name}"
+            return name
         except Exception:
-            return code
+            return clean_code
             
     @staticmethod
     def normalize_stock_id(code: str) -> str:
-        """標準化股票代號：自動補上 .TW 後綴並轉大寫"""
-        clean = code.strip().upper()
+        """標準化股票代號：支援中文名稱反查，或自動補上 .TW 後綴並轉大寫"""
+        clean = code.strip()
+        if not clean:
+            return ""
+            
+        # 1. 嘗試名稱反查
+        matched_ticker = None
+        for ticker, info in STOCK_DB.items():
+            name = info.get('name', '')
+            if clean == name:
+                return ticker  # 優先完全比對
+            if clean in name and not clean.isascii(): 
+                # 若包含中文且部分命中，先記下來（以第一個命中的為主）
+                if not matched_ticker:
+                    matched_ticker = ticker
+                    
+        if matched_ticker:
+            return matched_ticker
+            
+        # 2. 原始代號處理邏輯
+        clean = clean.upper()
         if not clean.endswith(".TW"):
             clean += ".TW"
         return clean

@@ -24,16 +24,23 @@ class RiskAssessment(BaseModel):
     risk_pct: float
 
 class StrategySignal(BaseModel):
-    signal: str  # e.g., "BUY", "SELL", "WAIT"
-    mode: str    # e.g., "Trend Following", "Stock Picking"
-    market_regime: str
+    signal: str  # e.g., "Buy", "Exit", "NoTrade", "Watch"
+    mode: str    # e.g., "Trend Following", "Stock Picking", "A", "B", "NoTrade"
+    market_regime: str # e.g., "BULL", "BEAR", "NEUTRAL"
     entry_price: Optional[float] = None
     stop_loss_price: Optional[float] = None
     target_price: Optional[float] = None
+    atr: Optional[float] = None
+    stop_loss_method: Optional[str] = None
+    risk_pct: Optional[float] = None
+    position_level: PositionLevel = Field(default=PositionLevel.NO_POSITION)
     exit_conditions: List[str] = Field(default_factory=list)
     reasons: List[str] = Field(default_factory=list)
+    not_buy_reasons: List[str] = Field(default_factory=list)
     valuation_warning: bool = False
-    
+    watch: bool = False
+    buy: bool = False
+    confidence: int = 0
 
 
 class FundFlowDetail(BaseModel):
