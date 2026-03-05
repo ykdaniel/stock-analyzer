@@ -1,0 +1,129 @@
+def strategy_engine(df: pd.DataFrame, stock_id: str = "", fundamentals: Optional[Dict[str, Any]] = None) -> Dict:
+    """
+    策略引擎 - 三層式架構整合
+    
+    Layer 1: 市場開關（Gate）- 判斷是否允許做多
+    Layer 2: 策略模式選擇（Mode Selector）- 決定用哪套邏輯
+    Layer 3: 股票評估（Stock Evaluation）- 產生完整交易卡片
+    
+    輸出格式（完整交易卡片）：
+    {
+        "signal": "Buy" | "Watch" | "NoTrade" | "Exit",
+        "mode": str,
+        "market_regime": str,
+        "position_level": str,
+        "entry_price": float,
+        "stop_loss_price": float,
+        "atr": float,
+        "stop_loss_method": str,
+        "risk_pct": float,
+        "exit_conditions": List[str],
+        "not_buy_reasons": List[str],
+        "valuation_warning": bool,
+        "watch": bool,
+        "buy": bool,
+        "confidence": int (0-100),
+        "reason": str
+    }
+    """
+    # 預設輸出結構
+    default_output = {
+        "signal": "NoTrade",
+        "mode": "NoTrade",
+        "market_regime": "UNKNOWN",
+        "position_level": PositionLevel.NO_POSITION,
+        "entry_price": None,
+        "stop_loss_price": None,
+        "atr": None,
+        "stop_loss_method": None,
+        "risk_pct": None,
+        "exit_conditions": [],
+        "not_buy_reasons": [],
+        "valuation_warning": False,
+        "watch": False,
+        "buy": False,
+        "confidence": 0,
+        "reason": "",
+        # 向後兼容欄位
+        "regime": "UNKNOWN",
+        "status": "",
+        "reasons": [],
+    }
+    
+    if df is None or df.empty or len(df) < 30:
+        default_output["reason"] = "資料不足，無法判斷"
+        default_output["status"] = default_output["reason"]
+        default_output["reasons"] = [default_output["reason"]]
+        return default_output
+    
+    # Layer 1: 市場開關
+    gate_result = market_regime_gate(df)
+    allow_long = gate_result["allow_long"]
+    market_regime = gate_result["regime"]
+    
+    if not allow_long:
+        return {
+            **default_output,
+            "market_regime": market_regime,
+            "reason": gate_result["reason"],
+            # 向後兼容欄位
+            "regime": market_regime,
+            "signal": "NoTrade",
+            "status": gate_result["reason"],
+            "reasons": [gate_result["reason"]],
+            "not_buy_reasons": ["空頭市場：多頭方向關閉"],
+        }
+    
+    # Layer 2: 策略模式選擇
+    mode_result = select_strategy_mode(df, market_regime)
+    strategy_mode = mode_result["mode"]
+    
+    if strategy_mode == "NoTrade":
+        return {
+            **default_output,
+            "market_regime": market_regime,
+            "mode": "NoTrade",
+            "reason": mode_result["reason"],
+            # 向後兼容欄位
+            "regime": market_regime,
+            "signal": "NoTrade",
+            "status": mode_result["reason"],
+            "reasons": [mode_result["reason"]],
+            "not_buy_reasons": ["不符合交易結構"],
+        }
+    
+    # Layer 3: 股票評估（傳入新參數）
+    eval_result = evaluate_stock(df, market_regime, strategy_mode, stock_id, fundamentals)
+    
+    # 模式名稱映射（向後兼容：Trend -> B, Pullback -> A）
+    mode_display = "B" if strategy_mode == "Trend" else "A"
+    
+    # 決定向後兼容的 signal 欄位
+    signal_compat = eval_result.get("signal", "NoTrade").lower()
+    if signal_compat == "notrade":
+        signal_compat = "none"
+    
+    return {
+        # 新格式欄位
+        "signal": eval_result.get("signal", "NoTrade"),
+        "mode": mode_display,  # 向後兼容：顯示 A/B
+        "market_regime": market_regime,
+        "position_level": eval_result.get("position_level", PositionLevel.NO_POSITION),
+        "entry_price": eval_result.get("entry_price"),
+        "stop_loss_price": eval_result.get("stop_loss_price"),
+        "atr": eval_result.get("atr"),
+        "stop_loss_method": eval_result.get("stop_loss_method"),
+        "risk_pct": eval_result.get("risk_pct"),
+        "exit_conditions": eval_result.get("exit_conditions", []),
+        "not_buy_reasons": eval_result.get("not_buy_reasons", []),
+        "valuation_warning": eval_result.get("valuation_warning", False),
+        "watch": eval_result.get("watch", False),
+        "buy": eval_result.get("buy", False),
+        "confidence": eval_result.get("confidence", 0),
+        "reason": eval_result.get("reason", ""),
+        # 向後兼容欄位
+        "regime": market_regime,
+        "status": eval_result.get("reason", ""),
+        "reasons": [eval_result.get("reason", "")],
+    }
+

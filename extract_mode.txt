@@ -1,0 +1,88 @@
+def select_strategy_mode(df: pd.DataFrame, market_regime: str) -> Dict[str, Any]:
+    """
+    Layer 2: 策略模式選擇（Mode Selector）
+    
+    職責：只決定「用哪種邏輯找股票」（結構分類）
+    不決定買不買，不篩股票
+    
+    Mode A（回檔型）：
+    - 價格接近 MA20 / MA60
+    - 未破前低（前 N 日 Low）
+    - MA60 方向不可下彎
+    
+    Mode B（趨勢型）：
+    - 價格站上 MA20 / MA60
+    - MA60 明確上彎
+    - 非低檔盤整
+    
+    輸出：
+    {
+        "mode": "Trend" | "Pullback" | "NoTrade",  # 內部使用，對應 Mode B/A
+        "reason": str
+    }
+    """
+    if df is None or df.empty or len(df) < 30:
+        return {
+            "mode": "NoTrade",
+            "reason": "資料不足"
+        }
+    
+    if market_regime == "BEAR":
+        return {
+            "mode": "NoTrade",
+            "reason": "空頭市場，不進行交易"
+        }
+    
+    curr = df.iloc[-1]
+    close = float(curr['Close'])
+    ma20 = float(curr.get('MA20', float('nan')))
+    ma60 = float(curr.get('MA60', float('nan')))
+    ma60_slope = float(df['MA60'].diff().tail(5).mean()) if 'MA60' in df.columns else 0.0
+    
+    # Helper: 只取「昨天以前」的連續 n 日視窗，嚴格排除今天
+    def prev_n_days(series: pd.Series, n: int) -> pd.Series:
+        if series is None or len(series) < n + 1:
+            return series.iloc[0:0]
+        return series.iloc[-(n + 1):-1]
+    
+    # Mode B（趨勢型）：價格站上 MA20/MA60，MA60 明確上彎，非低檔盤整
+    price_above_ma20 = close > ma20
+    price_above_ma60 = close >= ma60
+    ma20_above_ma60 = ma20 >= ma60
+    ma60_rising = ma60_slope > 0
+    
+    # 檢查是否為低檔盤整（價格在 MA60 下方但接近）
+    # NOTE: 只有當價格「未站穩」MA60 時才算低檔盤整，避免與 price_above_ma60 衝突
+    is_low_consolidation = (close < ma60) and (close > ma60 * 0.9)
+    
+    if price_above_ma20 and price_above_ma60 and ma20_above_ma60 and ma60_rising and not is_low_consolidation:
+        return {
+            "mode": "Trend",  # 對應 Mode B
+            "reason": "Mode B（趨勢型）：價格站上 MA20/MA60，MA60 上彎，非低檔盤整"
+        }
+    
+    # Mode A（回檔型）：價格接近 MA20/MA60，未破前低，MA60 方向不可下彎
+    price_near_ma20 = abs(close - ma20) / ma20 <= 0.05 if ma20 > 0 else False  # 5% 範圍內
+    price_near_ma60 = abs(close - ma60) / ma60 <= 0.05 if ma60 > 0 else False
+    price_near_ma = price_near_ma20 or price_near_ma60
+    
+    prev10_low = prev_n_days(df['Low'], 10)
+    recent_low_10 = float(prev10_low.min()) if not prev10_low.empty else float('nan')
+    no_new_low = close >= recent_low_10 if not prev10_low.empty else True
+    ma60_not_falling = ma60_slope >= 0  # MA60 不可下彎
+    
+    if price_near_ma and no_new_low and ma60_not_falling:
+        return {
+            "mode": "Pullback",  # 對應 Mode A
+            "reason": "Mode A（回檔型）：價格接近 MA20/MA60，未破前低，MA60 未下彎"
+        }
+    
+    # 不符合任何結構
+    # NOTE: 即使是 NEUTRAL 市場，若不符合 Mode A 條件，也應返回 NoTrade
+    # 避免將不符合結構的股票強制標記為 Pullback 模式
+    return {
+        "mode": "NoTrade",
+        "reason": "不符合 Mode A 或 Mode B 的結構條件" + ("（盤整市場）" if market_regime == "NEUTRAL" else "")
+    }
+
+

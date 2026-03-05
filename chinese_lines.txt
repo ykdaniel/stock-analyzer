@@ -1,0 +1,876 @@
+2: AI 量化戰情室 - 台股分析系統
+4: 【策略引擎升級版本 v2.0】
+6: 修復日期：2026-02-04
+7: 升級內容：
+8:   1. 修正邏輯鎖死問題
+9:      - NEUTRAL 市場不再直接 NoTrade，允許 Stock Picking 模式
+10:      - Buy 不被 Watch 狀態硬鎖（Buy = Trend_Buy OR Pullback_Buy）
+12:   2. KDJ 規則依 Mode 切換
+13:      - Pullback 模式：D <= 40 AND K >= D（低檔買入）
+14:      - Trend 模式：NOT (K < D AND D falling)（避免高檔死叉）
+16:   3. 補齊 Exit/Sell 條件
+19:      - Exit_Overheat: RSI > 80 OR KDJ 高檔死叉
+21:   4. 新增倉位建議（Position Sizing）
+22:      - 輸出等級：No_Position, Light, Medium, Heavy, Full
+23:      - 依市場狀態與模式決定基礎倉位
+24:      - 估值警示/高波動會自動降倉
+26:   5. 動態停損位計算（ATR 緩衝）
+27:      - Pullback 模式：Swing_Low - ATR * 0.5
+28:      - Trend 模式：MA20 - ATR * 1.0
+29:      - ATR 快取避免重複計算
+30:      - ATR 異常波動防呆（上限鉗制、比例檢查）
+32:   6. 動態估值與 EPS 警示
+33:      - EPS > 20 僅作警示，不否決 Buy
+34:      - PE > 40 一律視為「昂貴」
+35:      - 動態合理 PE 連動成長率
+37:   7. 輸出完整交易卡片
+42: 歷史修復：
+43:   2026-01-24: 移除 6 個重複函數定義，語法驗證通過
+71: # 0. 環境檢查與設定
+73: st.set_page_config(layout="wide", page_title="AI 量化戰情室 (最終旗艦版)")
+75: # 檢查 FinMind 是否安裝
+82:     st.error("❌ 未安裝 FinMind 套件。請執行 `pip install FinMind` 以啟用籌碼功能。")
+84: # 顏色設定 (Antigravity 專業版：旗艦紅綠配色)
+85: COLOR_UP = '#FF4B4B'    # 鮮豔紅 (上漲)
+86: COLOR_DOWN = '#00D964'  # 鮮豔綠 (下跌)
+89: # ATR 計算與快取模組
+91: # NOTE: ATR 是「尺度」，用於計算停損緩衝，不是「結構」判斷依據
+96:     計算 Average True Range (ATR)
+119: # 估值參數設定（Valuation Settings）
+121: # NOTE: EPS > EPS_HIGH_THRESHOLD 且 YoY Growth < 20% → 輸出估值警示
+128: # --- 全域 CSS 樣式 ---
+131:     /* 強制所有 Dataframe 表頭 (TH) 置中 */
+143:     /* 強制內容置中或靠右 (由 Pandas Styler 輔助) */
+145:     /* 輸入框底色改為淺灰色 */
+156: # --- 損益計算工具 ---
+161: # 1. 資料庫定義 (SSOT)
+164:     SEMI = "半導體/IC設計"
+165:     AI_PC = "AI/電腦週邊"
+166:     TRADITIONAL = "傳產/重電/原物料"
+167:     SHIPPING = "航運"
+168:     FINANCE = "金融"
+169:     COMPONENTS = "電子零組件/光電"
+170:     MEMORY = "記憶體"
+173:     # --- 記憶體 (擴充版) ---
+174:     "2408.TW": {"name": "南亞科", "sector": SectorType.MEMORY},
+175:     "2344.TW": {"name": "華邦電", "sector": SectorType.MEMORY},
+176:     "2337.TW": {"name": "旺宏", "sector": SectorType.MEMORY},
+177:     "8299.TW": {"name": "群聯", "sector": SectorType.MEMORY},
+178:     "3260.TW": {"name": "威剛", "sector": SectorType.MEMORY},
+179:     "2451.TW": {"name": "創見", "sector": SectorType.MEMORY},
+180:     "8271.TW": {"name": "宇瞻", "sector": SectorType.MEMORY},
+181:     "4967.TW": {"name": "十銓", "sector": SectorType.MEMORY},
+182:     "3006.TW": {"name": "晶豪科", "sector": SectorType.MEMORY},
+183:     "3135.TW": {"name": "凌航", "sector": SectorType.MEMORY},
+184:     "8084.TW": {"name": "巨虹", "sector": SectorType.MEMORY},
+185:     "8088.TW": {"name": "品安", "sector": SectorType.MEMORY},
+186:     "4973.TW": {"name": "廣穎", "sector": SectorType.MEMORY},
+187:     "5386.TW": {"name": "青雲", "sector": SectorType.MEMORY},
+188:     "8277.TW": {"name": "商丞", "sector": SectorType.MEMORY},
+190:     # --- 半導體 ---
+191:     "2330.TW": {"name": "台積電", "sector": SectorType.SEMI},
+192:     "2454.TW": {"name": "聯發科", "sector": SectorType.SEMI},
+193:     "2303.TW": {"name": "聯電", "sector": SectorType.SEMI},
+194:     "3711.TW": {"name": "日月光投控", "sector": SectorType.SEMI},
+195:     "2379.TW": {"name": "瑞昱", "sector": SectorType.SEMI},
+196:     "3034.TW": {"name": "聯詠", "sector": SectorType.SEMI},
+197:     "3035.TW": {"name": "智原", "sector": SectorType.SEMI},
+198:     "3661.TW": {"name": "世芯-KY", "sector": SectorType.SEMI},
+199:     "6415.TW": {"name": "矽力-KY", "sector": SectorType.SEMI},
+200:     "3443.TW": {"name": "創意", "sector": SectorType.SEMI},
+201:     "6515.TW": {"name": "穎崴", "sector": SectorType.SEMI},
+203:     # --- AI/電腦週邊 ---
+204:     "2317.TW": {"name": "鴻海", "sector": SectorType.AI_PC},
+205:     "2382.TW": {"name": "廣達", "sector": SectorType.AI_PC},
+206:     "3231.TW": {"name": "緯創", "sector": SectorType.AI_PC},
+207:     "6669.TW": {"name": "緯穎", "sector": SectorType.AI_PC},
+208:     "2357.TW": {"name": "華碩", "sector": SectorType.AI_PC},
+209:     "3017.TW": {"name": "奇鋐", "sector": SectorType.AI_PC},
+210:     "2345.TW": {"name": "智邦", "sector": SectorType.AI_PC},
+211:     "2301.TW": {"name": "光寶科", "sector": SectorType.AI_PC},
+212:     "3324.TW": {"name": "雙鴻", "sector": SectorType.AI_PC},
+213:     "2376.TW": {"name": "技嘉", "sector": SectorType.AI_PC},
+214:     "2368.TW": {"name": "金像電", "sector": SectorType.AI_PC},
+215:     "2383.TW": {"name": "台光電", "sector": SectorType.AI_PC},
+217:     # --- 傳產/重電 ---
+218:     "1513.TW": {"name": "中興電", "sector": SectorType.TRADITIONAL},
+219:     "1519.TW": {"name": "華城", "sector": SectorType.TRADITIONAL},
+220:     "1503.TW": {"name": "士電", "sector": SectorType.TRADITIONAL},
+221:     "1504.TW": {"name": "東元", "sector": SectorType.TRADITIONAL},
+222:     "1605.TW": {"name": "華新", "sector": SectorType.TRADITIONAL},
+223:     "2002.TW": {"name": "中鋼", "sector": SectorType.TRADITIONAL},
+224:     "1101.TW": {"name": "台泥", "sector": SectorType.TRADITIONAL},
+225:     "1301.TW": {"name": "台塑", "sector": SectorType.TRADITIONAL},
+226:     "1303.TW": {"name": "南亞", "sector": SectorType.TRADITIONAL},
+227:     "1326.TW": {"name": "台化", "sector": SectorType.TRADITIONAL},
+228:     "9958.TW": {"name": "世紀鋼", "sector": SectorType.TRADITIONAL},
+229:     "2014.TW": {"name": "中鴻", "sector": SectorType.TRADITIONAL},
+230:     "4763.TW": {"name": "材料-KY", "sector": SectorType.TRADITIONAL},
+231:     "1216.TW": {"name": "統一", "sector": SectorType.TRADITIONAL},
+232:     "2912.TW": {"name": "統一超", "sector": SectorType.TRADITIONAL},
+233:     "9910.TW": {"name": "豐泰", "sector": SectorType.TRADITIONAL},
+234:     "2207.TW": {"name": "和泰車", "sector": SectorType.TRADITIONAL},
+236:     # --- 航運 ---
+237:     "2603.TW": {"name": "長榮", "sector": SectorType.SHIPPING},
+238:     "2609.TW": {"name": "陽明", "sector": SectorType.SHIPPING},
+239:     "2615.TW": {"name": "萬海", "sector": SectorType.SHIPPING},
+240:     "2618.TW": {"name": "長榮航", "sector": SectorType.SHIPPING},
+241:     "2610.TW": {"name": "華航", "sector": SectorType.SHIPPING},
+243:     # --- 金融 ---
+244:     "2881.TW": {"name": "富邦金", "sector": SectorType.FINANCE},
+245:     "2882.TW": {"name": "國泰金", "sector": SectorType.FINANCE},
+246:     "2891.TW": {"name": "中信金", "sector": SectorType.FINANCE},
+247:     "2886.TW": {"name": "兆豐金", "sector": SectorType.FINANCE},
+248:     "2884.TW": {"name": "玉山金", "sector": SectorType.FINANCE},
+249:     "2892.TW": {"name": "第一金", "sector": SectorType.FINANCE},
+250:     "5880.TW": {"name": "合庫金", "sector": SectorType.FINANCE},
+251:     "2880.TW": {"name": "華南金", "sector": SectorType.FINANCE},
+252:     "2885.TW": {"name": "元大金", "sector": SectorType.FINANCE},
+253:     "2883.TW": {"name": "開發金", "sector": SectorType.FINANCE},
+254:     "2887.TW": {"name": "台新金", "sector": SectorType.FINANCE},
+255:     "5871.TW": {"name": "中租-KY", "sector": SectorType.FINANCE},
+256:     "2890.TW": {"name": "永豐金", "sector": SectorType.FINANCE},
+257:     "5876.TW": {"name": "上海商銀", "sector": SectorType.FINANCE},
+259:     # --- 電子零組件 ---
+260:     "2308.TW": {"name": "台達電", "sector": SectorType.COMPONENTS},
+261:     "3037.TW": {"name": "欣興", "sector": SectorType.COMPONENTS},
+262:     "3008.TW": {"name": "大立光", "sector": SectorType.COMPONENTS},
+263:     "2327.TW": {"name": "國巨", "sector": SectorType.COMPONENTS},
+264:     "2412.TW": {"name": "中華電", "sector": SectorType.COMPONENTS},
+265:     "4904.TW": {"name": "遠傳", "sector": SectorType.COMPONENTS},
+266:     "3045.TW": {"name": "台灣大", "sector": SectorType.COMPONENTS},
+267:     "3406.TW": {"name": "玉晶光", "sector": SectorType.COMPONENTS},
+268:     "6271.TW": {"name": "同欣電", "sector": SectorType.COMPONENTS},
+269:     "2395.TW": {"name": "研華", "sector": SectorType.COMPONENTS}
+273: # 台灣50 成分股（近似版）與「排除金融」版本
+275: # 說明：
+276: # - 這裡使用的是依照 0050 成分股整理出的常見台灣50成分股近似名單。
+277: # - 主要成分幾乎全數涵蓋，但指數成分會隨時間微調，若未來官方名單有變更，可在此列表增減。
+278: # - `TAIWAN50_EX_FIN_TICKERS` 會排除金融股 (28xx.TW / 5880.TW 等)，供「台灣50 (排除金融)」頁面使用。
+280:     "2330.TW",  # 台積電
+281:     "2317.TW",  # 鴻海
+282:     "2454.TW",  # 聯發科
+283:     "2308.TW",  # 台達電
+284:     "2382.TW",  # 廣達
+285:     "2303.TW",  # 聯電
+286:     "3711.TW",  # 日月光投控
+287:     "2311.TW",  # 日月光（備用，視版本而定）
+288:     "2301.TW",  # 光寶科
+289:     "2379.TW",  # 瑞昱
+290:     "3034.TW",  # 聯詠
+291:     "3035.TW",  # 智原
+292:     "6669.TW",  # 緯穎
+293:     "2383.TW",  # 台光電
+294:     "2327.TW",  # 國巨
+295:     "2412.TW",  # 中華電
+296:     "4904.TW",  # 遠傳
+297:     "3045.TW",  # 台灣大
+298:     "2305.TW",  # 全友
+299:     "1301.TW",  # 台塑
+300:     "1303.TW",  # 南亞
+301:     "1326.TW",  # 台化
+302:     "6505.TW",  # 台塑化
+303:     "2002.TW",  # 中鋼
+304:     "2603.TW",  # 長榮
+305:     "2609.TW",  # 陽明
+306:     "2615.TW",  # 萬海
+307:     "2618.TW",  # 長榮航
+308:     "1513.TW",  # 中興電
+309:     "1519.TW",  # 華城
+310:     "1503.TW",  # 士電
+311:     "1605.TW",  # 華新
+312:     "1101.TW",  # 台泥
+313:     "1216.TW",  # 統一
+314:     "2912.TW",  # 統一超
+315:     "2881.TW",  # 富邦金
+316:     "2882.TW",  # 國泰金
+317:     "2891.TW",  # 中信金
+318:     "2886.TW",  # 兆豐金
+319:     "2884.TW",  # 玉山金
+320:     "2892.TW",  # 第一金
+321:     "2880.TW",  # 華南金
+322:     "2885.TW",  # 元大金
+323:     "2883.TW",  # 開發金
+324:     "2887.TW",  # 台新金
+325:     "5871.TW",  # 中租-KY
+326:     "5876.TW",  # 上海商銀
+327:     "6269.TW",  # 台郡（部分版本）
+328:     "2357.TW",  # 華碩
+329:     "2376.TW",  # 技嘉
+338: # AI 概念股清單
+340: # 說明：涵蓋 AI 伺服器供應鏈、散熱、CoWoS 先進封裝、ASIC、網通等 AI 相關概念股
+342:     "2330.TW",  # 台積電 (AI晶片代工)
+343:     "2454.TW",  # 聯發科 (AI晶片設計)
+344:     "2382.TW",  # 廣達 (AI伺服器)
+345:     "3231.TW",  # 緯創 (AI伺服器)
+346:     "6669.TW",  # 緯穎 (雲端伺服器)
+347:     "2317.TW",  # 鴻海 (AI伺服器代工)
+348:     "3017.TW",  # 奇鋐 (AI散熱)
+349:     "2345.TW",  # 智邦 (AI網通)
+350:     "3661.TW",  # 世芯-KY (ASIC設計)
+351:     "6415.TW",  # 矽力-KY (電源管理IC)
+352:     "2379.TW",  # 瑞昱 (網通晶片)
+353:     "3034.TW",  # 聯詠 (驅動IC/AI邊緣)
+354:     "2376.TW",  # 技嘉 (AI伺服器/顯卡)
+355:     "2357.TW",  # 華碩 (AI PC)
+356:     "3443.TW",  # 創意 (ASIC設計服務)
+357:     "2383.TW",  # 台光電 (CCL/AI伺服器)
+358:     "3037.TW",  # 欣興 (ABF載板)
+359:     "3711.TW",  # 日月光投控 (先進封裝)
+360:     "2308.TW",  # 台達電 (電源/散熱)
+361:     "6515.TW",  # 穎崴 (探針卡)
+364: # 動態生成衍生資料
+366: # 移除已知在 yfinance 會 404 或下市的代碼（診斷後判定）
+376: # 補充常見類股名稱到下拉選單（若該類股尚無成分，保留為空列表）
+378:     "生技/醫療",
+379:     "綠能/再生能源",
+380:     "半導體設備",
+381:     "電動車/電池",
+382:     "軟體/雲端服務",
+383:     "光電/面板",
+384:     "消費性電子",
+385:     "半導體材料",
+386:     "不動產/建設",
+387:     "食品/日用品",
+388:     "航太/國防",
+398:     標準化股票代號：自動補上 .TW 後綴並轉大寫
+400:     範例：
+418: # --- 全域樣式函式 ---
+421:     統一對 DataFrame 套用樣式：
+422:     1. 標題置中
+423:     2. 數值靠右
+424:     3. 指定欄位千分位與小數點格式
+425:     4. 損益欄位顏色 (紅漲綠跌)
+427:     # 顏色設定
+430:         # 紅漲(正) 綠跌(負)
+434:     # 建立 Styler
+437:     # 1. 數值格式 (千分位)
+440:     # (A) 金額與股數：整數顯示
+441:     amount_cols = ['股數', '成本(含費)', '市值(扣費)', '未實現損益(元)', '已實現淨損益', '成交量', '量能', '前日買賣超', '今日買賣超']
+446:     # (B) 股價：小數點後兩位
+447:     price_cols = ['買入價', '買入單價', '賣出單價', '最新價', '收盤價', '開盤價', '最高價', '最低價', 'MA5', 'MA10', 'MA20', 'MA60']
+452:     # (C) 百分比格式
+453:     pct_cols = ['未實現損益(%)', '報酬率(%)', '漲跌幅']
+460:     # 2. 顏色 (損益欄位)
+461:     profit_cols = ['未實現損益(元)', '未實現損益(%)', '已實現淨損益', '報酬率(%)', '漲跌幅']
+465:     # 3. 對齊 (標題置中，數值靠右)
+476:     取得股票顯示名稱（優先中文）：
+477:     1. 先從內建 STOCK_DB 對照表（中文）
+478:     2. 再從 FinMind taiwan_stock_info 取得中文名稱
+479:     3. 若都沒有，最後才用 yfinance 英文名稱
+485:         # 1) 內建對照表
+489:         # 2) FinMind 中文名稱
+503:         # 3) yfinance 英文名稱（最後備援）
+518: # 觀察清單檔案路徑（共用）
+523:     """從文件加載觀察清單。"""
+533:     """將觀察清單保存到文件。成功回傳 True。"""
+541:             st.error(f"保存觀察清單失敗：{e}")
+545:     """將股票加入觀察清單（避免重複），並保存到文件。"""
+552:             st.session_state['watchlist'] = wl  # 仍更新 session，僅寫檔失敗
+554: # 若某些類股為空，為下拉選單提供代表性成分（僅作為掃描示例，不修改 `STOCK_DB`）
+556:     "生技/醫療": ["3034.TW"],
+557:     "綠能/再生能源": ["1216.TW"],
+558:     "半導體設備": ["3711.TW"],
+559:     "電動車/電池": ["2207.TW"],
+560:     "軟體/雲端服務": ["2345.TW"],
+561:     "光電/面板": ["2383.TW"],
+562:     "消費性電子": ["2357.TW"],
+563:     "半導體材料": ["6415.TW"],
+564:     "不動產/建設": ["1216.TW"],
+565:     "食品/日用品": ["2912.TW"],
+566:     "航太/國防": ["2603.TW"],
+575: # 2. 資料模型 (DTO)
+579:     """股票分析結果資料類別"""
+589:         """生成狀態摘要"""
+590:         return " / ".join(self.reasons) if self.reasons else "無符合項目"
+593: # 3. 資料提供者 (Data Providers)
+596:     """負責處理類股與股票清單 (FinMind)"""
+599:     @st.cache_data(ttl=86400) # 快取一天
+613:         """取得所有產業類別清單"""
+616:         # 過濾掉空的與不需要的類別
+622:         """取得指定類別的股票資訊 (ID -> Name Dict)"""
+627:         # 建立 ID (.TW) -> Name 的對照表
+635:     """負責處理技術與價格資料 (yfinance)"""
+640:         下載技術資料供指標與策略判斷使用
+642:         說明：
+643:         - 策略計算需要比 UI 起始日更長的歷史，用來供 MA60、RSI 等指標穩定收斂
+644:         - 接收 UI 傳入的 start_date，但實際抓取區間會「往前多抓約 100 天」，同時最多回溯 5 年
+645:         - yfinance 的 end 參數為「到但不含 end 當日」，因此會將 end 設為「明天」，避免漏掉今天
+648:         base_end = today + pd.DateOffset(days=1)  # 避免漏抓今天
+650:         # UI 給的分析起始日（若無，預設為 5 年前）
+656:         # 為技術指標預留 100 天的緩衝區間
+664:         # 處理 yfinance 多層索引
+668:         # 允許較短歷史資料（下限可調）
+677:         """批量下載多檔股票資料 (優化效能)"""
+699:         # 如果只有一檔，yfinance 回傳的結構不同，需標準化
+708:         # 多檔處理
+722:         """(內部方法) 為 DataFrame 計算技術指標"""
+732:         # --- 均線計算 ---
+740:         # 短線多頭啟動訊號
+751:         # 成交量
+757:         # 關鍵位置
+765:         rs = gain / (loss + 1e-10)  # 避免除零
+768:         # MACD（使用台股常見命名：DIF, DEA）
+771:         df['DIF'] = ema12 - ema26  # 快線
+772:         df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()  # 慢線
+773:         df['MACD_Hist'] = df['DIF'] - df['DEA']  # 柱狀圖
+775:         # 同時保留 MACD/MACD_Signal 命名（向後相容）
+779:         # KDJ 指標 (9, 3, 3)
+782:         rsv = (df['Close'] - low_min) / (high_max - low_min + 1e-10) * 100  # 避免除零
+787:         # --- ATR 計算（供停損緩衝使用）---
+796:         # Swing Low（近10日最低點，供回檔模式停損使用）
+802:     """負責處理籌碼面資料 (FinMind) - 穩健版"""
+807:         """Resource Cache: 鎖定 DataLoader 實體"""
+822:             # 請求數據
+833:         """清洗並計算外資數據 (模糊搜尋版)"""
+838:             # 調整日期：往前推45天以確保有足夠數據計算均線
+847:             # 欄位名稱檢查 (FinMind 欄位通常是 'name')
+850:             # [關鍵修正] 使用 str.contains 模糊比對，抓取 "外資" 或 "Foreign"
+851:             mask = df[name_col].astype(str).str.contains('Foreign|外資|Foreign_Investor', case=False, na=False)
+855:                 logger.debug("No data matched filter '外資|Foreign'. Stock: %s", stock_id_clean)
+858:             # 處理同日期多筆資料 (groupby sum)
+861:                 # 嘗試找日期欄位
+868:             # 計算買賣超 (張數)
+873:             # 計算 5日籌碼均線
+884:     """一次下載多檔最新收盤價，快取 60 秒。參數需為 tuple 以可 hash。"""
+904:             # 單檔時可能為一般欄位
+920: # 4. 核心邏輯層 (Business Logic)
+932:         # 分析與策略一律使用完整資料（最近 5 年），不受分析起始日影響
+935:         # 選擇性抓取籌碼 (單股體檢才抓，避免掃描時太慢)
+945:         # --- 評分邏輯 ---
+946:         # 1. 估值
+952:         if peg is not None and peg <= 1.2: score += 1; passed_reasons.append("PEG優")
+956:             score += 1; passed_reasons.append("EPS成長>10%")
+960:         if revenue_growth > 0.1: score += 1; passed_reasons.append("營收雙位數成長")
+962:         # 2. 趨勢
+963:         if curr['MA20'] > curr['MA60']: score += 1; passed_reasons.append("均線多頭")
+964:         if curr['Close'] > curr['MA60']: score += 1; passed_reasons.append("站上季線")
+965:         if curr['MA60_Rising']: score += 1; passed_reasons.append("季線上彎")
+967:         # 3. 動能
+969:         if rsi_golden_cross: score += 1; passed_reasons.append("RSI翻揚")
+971:         if macd_turning_up: score += 1; passed_reasons.append("MACD轉強")
+973:         # 4. 價量
+974:         if curr['Close'] > curr['High_60']: score += 1; passed_reasons.append("突破前高")
+976:         if vol_ratio >= 1.3: score += 1; passed_reasons.append("爆量")
+1002:     MA5 突破 MA20 篩選函數
+1004:     條件：
+1005:     1. 股價站上5日線（close > MA5）
+1006:     2. 5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）
+1026:         # 條件1：股價站上5日線
+1033:         # 檢查是否有 NaN
+1037:         # 條件1：股價站上5日線
+1040:         # 條件2：5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）
+1044:             # 基本面資訊（僅供參考）
+1056:                 "status": "✅ 符合條件",
+1065: # 5. 視圖層 (View / UI)
+1068:     st.markdown(f"## 🏥 {stock_name} ({stock_id}) 深度投資體檢報告")
+1076:     # 🧠 策略引擎總結區塊（傳入完整參數以支援新功能）
+1088:             "reason": "資料不足或計算失敗",
+1099:     # 提取所有欄位
+1116:     st.subheader("🧠 策略引擎判斷 (完整交易卡片)")
+1118:     # 左側：主要決策卡片
+1123:             **✅ Buy 訊號觸發**
+1125:             信心度：{confidence}%  
+1127:             建議倉位：{position_level}
+1129:             st.caption("條件完整，可執行交易")
+1132:             **👀 Watchlist 觀察中**
+1134:             信心度：{confidence}%  
+1137:             st.caption("值得盯，但尚未觸發買點")
+1140:             **🚪 Exit 出場訊號**
+1142:             信心度：{confidence}%  
+1145:             st.caption("建議考慮出場或減碼")
+1148:             **目前無明確進場設定**
+1150:             市場狀態或結構尚未符合條件
+1153:     # 右側：詳細資訊
+1155:         # 市場狀態
+1158:             regime_txt = "BULL（多頭市場）"
+1161:             regime_txt = "NEUTRAL（盤整市場）"
+1164:             regime_txt = "BEAR（空頭市場）"
+1167:             regime_txt = "未知"
+1169:         # 信心度進度條
+1170:         st.markdown(f"**市場狀態**：{regime_icon} {regime_txt}")
+1171:         st.markdown(f"**策略型態**：Mode {mode or '-'}")
+1172:         st.progress(confidence / 100, text=f"信心度：{confidence}%")
+1174:         # Watch / Buy 狀態
+1178:                 st.markdown("**Watch**：✅ 是")
+1180:                 st.markdown("**Watch**：❌ 否")
+1183:                 st.markdown("**Buy**：✅ 是")
+1185:                 st.markdown("**Buy**：❌ 否")
+1187:         # 估值警示
+1189:             st.warning("⚠️ 估值警示：EPS 偏高或 PE 昂貴")
+1191:         # 理由說明
+1194:             st.markdown(f"**判斷理由**：")
+1197:     # ===== 📋 完整交易卡片區塊 =====
+1199:         st.markdown("### 📋 交易執行卡片")
+1203:             st.metric("建議倉位", position_level)
+1210:                 st.metric("參考進場價", f"${entry_price:.2f}")
+1212:                 st.metric("停損價", f"${stop_loss_price:.2f}")
+1216:                 st.metric("風險 %", f"{risk_pct:.2f}%")
+1218:                 st.caption(f"停損方法：{stop_loss_method}")
+1222:     # ===== 🚪 出場條件區塊 =====
+1224:         st.markdown("### 🚪 出場條件提醒")
+1226:             if "趨勢破壞" in cond or "過熱" in cond:
+1227:                 st.error(f"🔥 {cond}")  # 紅色：嚴重警示
+1228:             elif "防守出場" in cond or "趨勢結束" in cond:
+1229:                 st.warning(f"⚠️ {cond}")  # 黃色：標準出場
+1230:             elif "短線轉弱" in cond:
+1231:                 st.info(f"📉 {cond}")     # 藍色：早期預警
+1236:     # ===== ❌ 不買入原因區塊（僅在非 Buy 時顯示）=====
+1238:         with st.expander("❌ 不買入原因", expanded=False):
+1244:     # 若 session 有最近一次外資轉向事件，且屬於此股票，於頁面頂部顯示橫幅
+1248:         if '賣轉買' in evt['type']:
+1249:             st.success(f"🚨 外資近期轉向 (最新): {evt['date']} — {evt['type']}：{evt['prev']:.0f} → {evt['last']:.0f} 張")
+1251:             st.warning(f"⚠️ 外資近期轉向 (最新): {evt['date']} — {evt['type']}：{evt['prev']:.0f} → {evt['last']:.0f} 張")
+1255:     # 1. 估值面
+1256:     st.subheader("1️⃣ 估值面診斷 (相對標準)")
+1260:         check_item("本益比 P/E", fundamentals['PE'], fundamentals['PE'] < 30, "(< 30 合理)")
+1262:         p2 = check_item("成長修正 PEG", peg_val, peg_val <= 1.2, "(標準 ≤ 1.2)")
+1267:         check_item("EPS 成長率 (YoY)", gw_val * 100, gw_val > 0.1, "% (需 > 10)")
+1268:         st.write(f"ℹ️ 最近 EPS: {fundamentals['EPS']:.2f} 元")
+1272:     if val_score >= 3: st.success(f"💎 估值評價：優良 ({val_score}/4)")
+1273:     elif val_score >= 2: st.warning(f"⚠️ 估值評價：普通 ({val_score}/4)")
+1274:     else: st.error(f"💀 估值評價：昂貴或衰退 ({val_score}/4)")
+1277:     # 2. 技術面
+1280:         st.subheader("2️⃣ 趨勢結構 (Trend)")
+1286:         check_item("短線趨勢 (MA5/20)", ma5_val - ma20_val, is_short_strong, "(MA5 > MA20)")
+1287:         t1 = check_item("均線排列 (MA20/60)", curr['MA20'] - curr['MA60'], curr['MA20'] >= curr['MA60'], "(多頭)")
+1288:         t2 = check_item(f"股價 vs 季線({ma60_val:.0f})", curr['Close'], curr['Close'] >= ma60_val, "(線上)")
+1289:         t3 = check_item("季線方向", "上彎" if slope_ok else "走平/下彎", slope_ok, "")
+1292:         st.subheader("3️⃣ 動能訊號 (Momentum)")
+1295:         check_item("RSI 強度", f"{curr['RSI']:.1f}", curr['RSI'] >= 50, "(>50 多方區)")
+1296:         check_item("MACD 攻擊", "是" if macd_up else "否", macd_up, "(紅柱增長)")
+1299:         st.subheader("4️⃣ 價量確認 (Volume)")
+1303:         check_item("突破前高", f"{high_60:.2f}", breakout, "(壓力價)")
+1304:         check_item("攻擊量能", f"{vol_ratio:.2f}倍", vol_ratio >= 1.3, "(> 1.3倍)")
+1308:     # 5. 籌碼面
+1310:         st.subheader("5️⃣ 外資籌碼動向 (Foreign Investor)")
+1312:         # 對齊並補值
+1315:              st.warning("⚠️ 籌碼資料日期與 K 線無法對齊")
+1319:                 st.warning("⚠️ 查無外資數據 (盤中可能尚未更新)")
+1323:                 st.markdown(f"**最新外資買賣超**: <span style='color:{c_color};font-weight:bold;'>{net_buy_val:.0f} 張</span>", unsafe_allow_html=True)
+1326:                 chip_status = "外資連買" if recent_5_days > 0 else "外資調節"
+1327:                 st.info(f"💡 近5日外資累計: {recent_5_days:.0f} 張 ({chip_status})")
+1328:                 # 檢測外資買賣趨勢是否發生由賣轉買或由買轉賣的轉向
+1332:                     # 記錄事件於 session
+1338:                     if "賣轉買" in kind:
+1339:                         st.success(f"🚨 外資轉向：由賣轉買 — 前: {prev_val:.0f} 張 → 現: {last_val:.0f} 張")
+1340:                     elif "買轉賣" in kind:
+1341:                         st.warning(f"⚠️ 外資轉向：由買轉賣 — 前: {prev_val:.0f} 張 → 現: {last_val:.0f} 張")
+1343:                 # 顯示 session 中的外資轉向紀錄
+1347:             st.warning("⚠️ FinMind 套件未安裝，無法顯示外資數據。\n安裝指令: `pip install FinMind`")
+1349:             st.warning("⚠️ 查無外資數據 (FinMind 連線逾時或該股票無外資資料)")
+1353:     # 6. 進出場時機 (KDJ) 與 AI 綜合總結
+1354:     st.subheader("6️⃣ 進出場時機 (KDJ) 與 AI 綜合總結")
+1358:         st.write("#### 🟢 買進/觀察訊號 (KDJ 狀態)")
+1359:         # 直接使用引擎理由中關於 KDJ 的部分
+1360:         kdj_msg = "KDJ 狀態：分析中..."
+1366:             st.success(f"✨ **符合進場特徵**\n\n{kdj_msg}")
+1368:             st.warning(f"👀 **觀察結構成立**\n\n{kdj_msg}")
+1370:             st.info(f"⚪ **尚未符合進場條件**\n\n{kdj_msg}")
+1373:         st.write("#### 🔴 賣出/出場警示監測")
+1378:             st.write("✅ **目前無明顯轉弱或出場訊號** (持有續抱)")
+1380:     # 一句話判定
+1381:     # 取出扣除 KDJ 狀態後的核心理由作為綜合建議
+1383:     core_msg = "；".join(core_reasons) if core_reasons else "無明顯趨勢訊號"
+1386:         summary_msg = f"**積極偏多**：{core_msg}，請參考 KDJ 狀態輔助進場。"
+1388:         summary_msg = f"**持續觀察**：{core_msg}，等待更明確的 KDJ 表態或量能確認。"
+1390:         summary_msg = f"**建議觀望**：{core_msg}，目前不符合策略進場邏輯。"
+1392:     st.info(f"💡 **AI 總結**：{summary_msg}")
+1395:     # 策略判定
+1396:     st.subheader("🎯 AI 戰略地圖與價格分級")
+1401:     # 根據引擎訊號決定戰略 (同步引擎引擎結果)
+1403:         action_type = "積極攻擊"
+1404:         msg_title = "🚀 策略提示：執行買進"
+1405:         msg_desc = f"引擎判定模式為 {mode}，目前為理想進場點。建議停損設於 {stop_loss_price if stop_loss_price else '-'}。"
+1408:         action_type = "防守等待"
+1409:         msg_title = "🛡️ 策略提示：觀察等待"
+1410:         msg_desc = "趨勢結構正確，但尚未出現最佳觸發點。請等待回測或帶量突破。"
+1413:         action_type = "空手/避開"
+1414:         msg_title = "🛑 策略提示：暫不操作"
+1415:         msg_desc = "目前結構不符合策略。請耐心等待趨勢明朗。"
+1422:     # 價格分級表 (樣式優化)
+1430:                 <th style="padding: 8px;">角色</th>
+1431:                 <th style="padding: 8px;">價格 (約)</th>
+1432:                 <th style="padding: 8px;">策略意義</th>
+1433:                 <th style="padding: 8px;">操作建議</th>
+1438:                 <td style="padding: 8px;">🚀 <strong>壓力參考</strong></td>
+1440:                 <td style="padding: 8px;">60日最高壓力</td>
+1441:                 <td style="padding: 8px;">若帶量突破，可視為新波段確認。</td>
+1444:                 <td style="padding: 8px;">📍 <strong>目前市價</strong></td>
+1446:                 <td style="padding: 8px;">當下成交價</td>
+1447:                 <td style="padding: 8px;">目前的持倉成本參考。</td>
+1450:                 <td style="padding: 8px;">🛡️ <strong>趨勢支撐</strong></td>
+1452:                 <td style="padding: 8px;">MA60 (季線)</td>
+1453:                 <td style="padding: 8px;">中期多頭生命線。</td>
+1456:                 <td style="padding: 8px;">🛑 <strong>停損/出場點</strong></td>
+1458:                 <td style="padding: 8px;">動態停損位</td>
+1459:                 <td style="padding: 8px;">跌破此價位建議執行出場。</td>
+1466:     # 📊 圖表區
+1468:     # 根據側邊欄「分析起始日」決定線圖顯示區間（僅影響圖表，不影響指標與策略判斷）
+1476:                 # 若選到未來或資料不足，改回顯示完整區間，並給使用者提醒
+1486:         st.info("📅 目前選擇的分析起始日超出可用資料範圍，線圖已自動顯示完整期間。")
+1488:     # 📊 圖表區 (4列布局：K線、成交量、外資買賣超、MACD)
+1494:         # 加大子圖垂直間距，讓區塊更分明
+1496:         subplot_titles=("K線與關鍵位", "成交量", "外資買賣超(張)", "MACD 指標"),
+1500:     # --- Row 1: K線 ---
+1503:         name='K線',
+1513:     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['High_60'], line=dict(color='gray', dash='dash'), name='60日高 (壓力)'), row=1, col=1)
+1515:     # --- 停損線標註 ---
+1521:             name=f'停損參考 {stop_loss_price:.2f}'
+1523:     # --- Row 2: 成交量 (顏色跟隨當日漲跌，單位改為「張」) ---
+1526:     volume_in_lots = df_plot['Volume'] / 1000  # 股數轉張數
+1527:     fig.add_trace(go.Bar(x=df_plot.index, y=volume_in_lots, marker_color=colors_vol, name='成交量(張)', legend='legend2'), row=2, col=1)
+1529:     # --- Row 3: 外資買賣超 ---
+1546:                 name='外資買賣超',
+1557:                 name='外資5MA',
+1566:     fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=colors_macd, name='MACD柱狀', legend='legend4'), row=4, col=1)
+1567:     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DIF'], line=dict(color='#2962FF', width=1), name='DIF (快)', legend='legend4'), row=4, col=1)
+1568:     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DEA'], line=dict(color='#FF6D00', width=1), name='DEA (慢)', legend='legend4'), row=4, col=1)
+1573:         title_text=f"{stock_id} 綜合分析圖",
+1581:     # 移除邊框設定，保持圖表乾淨
+1583:     # 設定 Y 軸標題
+1584:     fig.update_yaxes(title_text="成交量(張)", row=2, col=1)
+1585:     fig.update_yaxes(title_text="外資買賣超", row=3, col=1)
+1590: # 輔助功能
+1599:     """檢測外資買賣超由賣轉買或由買轉賣。
+1600:     主要以 `Net_Buy` 的最後兩個非 NA 值判斷；若不足則以 `Chip_MA5` 判斷。
+1601:     回傳 (kind, prev_val, last_val) 或 None。
+1612:                 return ("賣轉買", prev_val, last_val)
+1614:                 return ("買轉賣", prev_val, last_val)
+1616:         # 若 Net_Buy 不足以判斷，改用 Chip_MA5 的交叉
+1622:                 return ("賣轉買(MA)", prev_ma, last_ma)
+1624:                 return ("買轉賣(MA)", prev_ma, last_ma)
+1631:     """將外資轉向事件存入 `st.session_state['chip_switch_history']`（session 內暫存）。"""
+1644:         # 避免重複記錄（若最後一筆相同則略過）
+1648:             # 限制歷史長度
+1654:         # 也記錄最近一次事件供快速顯示
+1660:     """在 UI 中顯示最近的外資轉向紀錄（僅 session 內）。"""
+1661:     st.subheader("📜 外資轉向紀錄 (Session)")
+1663:         st.info("目前無外資轉向歷史紀錄。")
+1666:     # 顯示該股票的紀錄（若無則顯示全域最近 5 筆）
+1673:     # 為每一筆事件建立中文摘要
+1679:         if kind in ("sell_to_buy", "賣轉買"):
+1680:             direction = "由賣轉買"
+1681:         elif kind in ("buy_to_sell", "買轉賣"):
+1682:             direction = "由買轉賣"
+1684:             direction = "轉向"
+1685:         return f"{date_s}：外資{direction}，{prev_v:.0f} → {last_v:.0f} 張"
+1690:     # 只顯示關鍵欄位與摘要（若缺欄位則盡量容錯）
+1694:         st.info("外資轉向紀錄格式異常，暫時無法顯示列表。")
+1698:     # 將表頭改為中文
+1700:         {'stock_id':'股票代號', 'kind':'轉向類型', 'prev':'前日買賣超', 'last':'今日買賣超', 'date':'日期', 'summary':'摘要說明'}.get(c, c) 
+1712: # 6. 主程式 - 側邊欄與頁面導航
+1714: st.sidebar.title("🎮 功能選單")
+1715: if 'current_page' not in st.session_state: st.session_state['current_page'] = "🏆 台灣50 (排除金融)"
+1716: if 'previous_page' not in st.session_state: st.session_state['previous_page'] = "🏆 台灣50 (排除金融)"
+1726: # 從文件加載觀察清單
+1730: page_options = ["🌊 市場資金流向 (法人單日板塊)", "🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
+1736: st.sidebar.radio("請選擇模式", page_options, index=nav_index, key="nav_radio", on_change=update_nav)
+1740:     """清除會受條件改變影響的暫存結果，避免 UI 顯示舊資料。"""
+1753: # 預設為一個月前
+1756:     "分析起始日", 
+1758:     help="主要影響趨勢圖的顯示範圍，不影響技術指標與策略判斷的計算"
+1761: # 偵測分析起始日是否變更，若有變更則清空暫存資料
+1770: # ----------------- 頁面: 市場資金流向 -----------------
+1771: if mode == "🌊 市場資金流向 (法人單日板塊)":
+1772:     st.header("🌊 市場資金流向 (法人單日板塊)")
+1773:     st.markdown("追蹤最近一個交易日，三大法人（外資、投信、自營商）淨流入/流出的熱點族群。")
+1775:     if st.button("📊 載入資金流向資料", type="primary"):
+1776:         with st.spinner("正在取得 FinMind 法人買賣超資料..."):
+1781:                 st.warning(f"無法取得 {latest_date} 的法人買賣超資料，可能是 API 限制或當日無資料。")
+1783:                 st.success(f"資料日期：{latest_date} (更新成功)")
+1785:                 # 準備繪圖資料：取前 15 大淨流入與前 5 大淨流出 (或全部)
+1787:                     {"板塊": r.sector_name, "淨流入(元)": r.total_net_flow}
+1791:                 # 著色：大於 0 為紅，小於 0 為綠 (台股習慣)
+1792:                 df_plot['顏色'] = df_plot['淨流入(元)'].apply(lambda x: COLOR_UP if x > 0 else COLOR_DOWN)
+1795:                     x=df_plot['淨流入(元)'],
+1796:                     y=df_plot['板塊'],
+1798:                     marker_color=df_plot['顏色'],
+1799:                     text=df_plot['淨流入(元)'].apply(lambda x: f"{x:,.0f}"),
+1804:                     title=f"三大法人單日淨買賣超 (依板塊) - {latest_date}",
+1805:                     xaxis_title="淨買賣超金額 (單位: 元)",
+1806:                     yaxis_title="產業板塊",
+1807:                     yaxis={'categoryorder':'total ascending'}, # 讓最多的在最上面
+1814:                 st.markdown("### 🏆 各板塊領頭羊 (淨買超榜)")
+1819:                 # 只顯示淨流入大於 0 的前幾個板塊
+1823:                     if print_idx >= 6: break # 只顯示前 6 大板塊的明細
+1827:                         st.caption(f"總流入: {r.total_net_flow:,.0f}")
+1828:                         # 列出該板塊前 3 大買超股
+1835: # ----------------- 頁面 A -----------------
+1836: if mode == "🏆 台灣50 (排除金融)":
+1837:     st.header("🏆 台灣50 掃描雷達")
+1838:     st.info("👇 點擊表格任一行，可進入深度體檢。")
+1839:     if st.button("🚀 啟動掃描", type="primary"):
+1843:         # 使用「台灣50 (排除金融)」真實股票池
+1848:             status_text.text(f"掃描中: {stock_name} ...")
+1849:             # 掃描模式：不抓籌碼 (include_chips=False)
+1853:                     "代號": stock_id, "名稱": stock_name, "分數": int(res_obj.score),
+1854:                     "收盤價": res_obj.fundamentals['Close'], "通過項目": res_obj.status_summary
+1860:             st.session_state['scan_results_tw50'] = pd.DataFrame(results).sort_values(by="分數", ascending=False)
+1871:             st.session_state['target_stock'] = df_display.iloc[idx]['代號']
+1872:             st.session_state['previous_page'] = "🏆 台灣50 (排除金融)" 
+1873:             st.session_state['current_page'] = "🔍 單一個股體檢"
+1876: # ----------------- 頁面 A2：AI概念股 -----------------
+1877: elif mode == "🤖 AI概念股":
+1878:     st.header("🤖 AI 概念股掃描雷達")
+1879:     st.info("👇 點擊表格任一行，可進入深度體檢。涵蓋 AI 伺服器、散熱、CoWoS、ASIC 等核心 AI 供應鏈。")
+1880:     if st.button("🚀 啟動掃描", type="primary", key="ai_concept_scan"):
+1887:             # 動態取得股票名稱（優先 STOCK_DB → FinMind → yfinance）
+1889:             status_text.text(f"掃描中: {stock_name} ...")
+1890:             # 掃描模式：不抓籌碼 (include_chips=False)
+1893:                 # 短線買點偵測：價格突破 5 日線 + MA5 上穿 MA10
+1898:                     # 檢查是否有 Break_Price_MA5 和 MA5_Break_MA10 欄位
+1900:                         # 檢查最近 3 天內是否有觸發買點訊號
+1905:                             buy_signal = "🔥 買點"
+1907:                             buy_signal = "⚡ 觀察"
+1910:                     "代號": stock_id, "名稱": stock_name, "分數": int(res_obj.score),
+1911:                     "短線買點": buy_signal,
+1912:                     "收盤價": res_obj.fundamentals['Close'], "通過項目": res_obj.status_summary
+1918:             # 優先顯示有買點的股票
+1920:             df_results['_sort_key'] = df_results['短線買點'].map({'🔥 買點': 0, '⚡ 觀察': 1, '❌': 2})
+1921:             df_results = df_results.sort_values(by=['_sort_key', '分數'], ascending=[True, False]).drop(columns=['_sort_key'])
+1933:             st.session_state['target_stock'] = df_display.iloc[idx]['代號']
+1934:             st.session_state['previous_page'] = "🤖 AI概念股" 
+1935:             st.session_state['current_page'] = "🔍 單一個股體檢"
+1938: # ----------------- 頁面 B -----------------
+1939: elif mode == "🚀 全自動量化選股 (動態類股版)":
+1940:     st.header("🚀 全自動量化選股 (動態類股版)")
+1941:     st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
+1946:     stock_info_map = {} # 存放動態抓取的 ID->Name 對照表
+1950:     # 定義需要特殊標示的電子科技類股（橘色底）
+1951:     TECH_SECTORS = ["光電業", "半導體業", "電子工業", "電腦及週邊設備業"]
+1953:     # 建立類股按鈕網格
+1955:         st.error("無法取得類股資料，請檢查 FinMind 連線。")
+1957:         # 橘色按鈕樣式 CSS
+1972:         # ===== 電子科技綜合掃描按鈕 =====
+1973:         st.markdown("#### 🔥 快速掃描")
+1974:         if st.button("⚡ 電子科技綜合掃描（光電/半導體/電子/電腦週邊）", type="primary", use_container_width=True, key="tech_combo_scan"):
+1975:             with st.spinner("正在抓取【電子科技綜合】成分股..."):
+1984:                 st.session_state['last_scanned_sector'] = "電子科技綜合"
+1986:                     st.success(f"已取得 {len(target_stocks)} 檔成分股（來自 {len(TECH_SECTORS)} 個類股）")
+1990:                     st.warning("無法取得成分股，請檢查網路連線。")
+1992:         st.markdown("#### 📂 單一類股掃描")
+1993:         # 每行 6 個按鈕
+1996:             # 判斷是否為電子科技類股，若是則套用橘色樣式
+2001:                 # 使用 container 包裝以套用 CSS class
+2010:                 with st.spinner(f"正在抓取【{sec}】成分股..."):
+2011:                     # 改用詳細資訊 (含名稱)
+2017:                         st.success(f"已取得 {len(target_stocks)} 檔成分股")
+2019:                         batch_mode = True # 啟用批次優化
+2021:                         st.warning("該類股無成分股或抓取失敗。")
+2023:     # 執行掃描邏輯
+2030:         # 決定資料獲取方式
+2033:             status_text.text("🚀 正在批次下載技術資料 (加速中)...")
+2038:             # 優先從動態抓取的 map 找名稱，找不到則回退到 STOCK_DB (Manual)
+2045:             status_text.text(f"分析中 ({i+1}/{total_stocks}): {stock_id} ...")
+2047:             # 使用批次抓好的資料 (若有)
+2050:             # 傳入 pre_fetched_df（唯一決策來源：strategy_engine）
+2055:                 # 根據 strategy_engine 的 watch / buy 分離清單
+2065:         # 儲存結果：分成 Watch / Buy 兩張清單
+2068:             df_buy.columns = ['代號', '名稱', '狀態', '理由', '收盤價', 'Mode', '信心度']
+2075:             df_watch.columns = ['代號', '名稱', '狀態', '理由', '收盤價', 'Mode', '信心度']
+2080:         # 不使用 rerun 以免重置按鈕狀態，直接顯示結果
+2088:     st.subheader(f"✅ Buy 清單 ({buy_count})")
+2089:     st.caption("條件完整、可執行交易的標的")
+2097:             code_sel = df_buy_show.iloc[idx]['代號']
+2098:             name_sel = df_buy_show.iloc[idx]['名稱']
+2101:                 if st.button("🔍 檢視個股體檢", key="buy_to_detail"):
+2103:                     st.session_state['previous_page'] = "🚀 全自動量化選股 (動態類股版)"
+2104:                     st.session_state['current_page'] = "🔍 單一個股體檢"
+2107:                 if st.button("⭐ 加入觀察清單", key="buy_to_watch"):
+2109:                     st.success(f"已加入觀察清單：{code_sel} {name_sel}")
+2111:         st.write("尚無資料 (請執行掃描)")
+2118:     st.subheader(f"👀 Watch 清單 ({watch_count})")
+2119:     st.caption("值得盯，但尚未觸發買點的標的")
+2127:             code_sel = df_watch_show.iloc[idx]['代號']
+2128:             name_sel = df_watch_show.iloc[idx]['名稱']
+2131:                 if st.button("🔍 檢視個股體檢", key="watch_to_detail"):
+2133:                     st.session_state['previous_page'] = "🚀 全自動量化選股 (動態類股版)"
+2134:                     st.session_state['current_page'] = "🔍 單一個股體檢"
+2137:                 if st.button("⭐ 加入觀察清單", key="watch_to_watchlist"):
+2139:                     st.success(f"已加入觀察清單：{code_sel} {name_sel}")
+2141:         st.write("尚無資料")
+2143: # ----------------- 頁面 C -----------------
+2144: elif mode == "📈 MA5突破MA20掃描":
+2145:     st.header("📈 MA5 突破 MA20 掃描")
+2146:     st.info("👇 掃描符合以下條件的股票：\n1. 股價站上5日線（close > MA5）\n2. 5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）")
+2148:     st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
+2157:     # 建立類股按鈕網格
+2159:         st.error("無法取得類股資料，請檢查 FinMind 連線。")
+2161:         # 每行 6 個按鈕
+2165:                 with st.spinner(f"正在抓取【{sec}】成分股..."):
+2170:                         st.success(f"已取得 {len(target_stocks)} 檔成分股")
+2174:                         st.warning("該類股無成分股或抓取失敗。")
+2176:     # 執行掃描邏輯
+2182:         # 決定資料獲取方式
+2185:             status_text.text("🚀 正在批次下載技術資料 (加速中)...")
+2190:             # 優先從動態抓取的 map 找名稱，找不到則回退到 STOCK_DB (Manual)
+2197:             status_text.text(f"掃描中 ({i+1}/{total_stocks}): {stock_name} ({stock_id}) ...")
+2199:             # 使用批次抓好的資料 (若有)
+2202:             # 使用 MA5 突破 MA20 篩選函數
+2214:         # 儲存結果
+2217:             df_results.columns = ['代號', '名稱', '狀態', '收盤價', 'MA5', 'MA20', 'PE', 'RSI']
+2222:             st.warning("未找到符合條件的股票")
+2224:     # 顯示結果
+2227:         st.subheader(f"✅ 符合條件清單 ({len(ma5_results)})")
+2228:         df_show = ma5_results.sort_values(by='收盤價', ascending=False)
+2234:             code_sel = df_show.iloc[idx]['代號']
+2235:             name_sel = df_show.iloc[idx]['名稱']
+2238:                 if st.button("🔍 檢視個股體檢", key="ma5_to_detail"):
+2240:                     st.session_state['previous_page'] = "📈 MA5突破MA20掃描"
+2241:                     st.session_state['current_page'] = "🔍 單一個股體檢"
+2244:                 if st.button("⭐ 加入觀察清單", key="ma5_to_watch"):
+2246:                     st.success(f"已加入觀察清單：{code_sel} {name_sel}")
+2248:         st.write("尚無符合條件的股票（請執行掃描）")
+2250:         st.write("請點擊「啟動掃描」開始掃描")
+2252: # ----------------- 頁面 D -----------------
+2253: elif mode == "📦 我持有的股票診斷":
+2254:     st.header("📦 我持有的股票診斷 (持股管理)")
+2255:     st.markdown("管理你的持股：新增、編輯、賣出並保存為歷史紀錄。資料會儲存在專案目錄下的 `holdings.json` 與 `history.json`。")
+2257:     # --- 檔案存放路徑 (使用模組層級已定義的 DATA_DIR，見第 325 行) ---
+2291:     # --- 新增持股表單 ---
+2292:     with st.expander('➕ 新增持股 / 調整現有持股', expanded=True):
+2296:                 code_in = st.text_input('代號 (例如 2330.TW)')
+2297:                 buy_date = st.date_input('買入日期')
+2299:                 buy_price = st.number_input('買入價格 (每股)', min_value=0.0, format='%f')
+2300:                 qty = st.number_input('股數', min_value=1, step=10, value=1000)
+2302:                 note = st.text_input('備註 (選填)')
+2303:             submitted = st.form_submit_button('➕ 新增一筆持股')
+2304:             st.caption("💡 提示：輸入相同代號會視為新的一筆買入（分批進場）。若要修改舊庫存，請使用下方表格的『編輯』功能。")
+2308:                     st.error('請輸入代號')
+2311:                     # 支援分批買進：直接 Append，不覆蓋舊資料
+2320:                     st.success('已新增一筆持股紀錄')
+2324:     # --- 顯示目前持股 ---
+2327:         st.info('目前沒有任何持股，請先新增。')
+2337:             # 使用統一函式計算（預設 6 折手續費）
+2345:                 '代號': code,
+2346:                 '名稱': name,
+2347:                 '買入日': h.get('buy_date'),
+2348:                 '買入價': buy_price,
+2349:                 '股數': qty,
+2350:                 '成本(含費)': total_cost,
+2351:                 '最新價': latest,
+2352:                 '市值(扣費)': net_value,
+2353:                 '未實現損益(元)': unreal,
+2354:                 '未實現損益(%)': pct,
+2355:                 '備註': h.get('note','')
+2364:                 return ('無資料', None, '無法取得分析結果')
+2372:                         # NOTE: detect_chip_switch 返回 tuple (kind, prev_val, last_val)，不是 dict
+2374:                         if '賣轉買' in kind or kind == 'sell_to_buy':
+2375:                             chip_note = '外資轉買'
+2376:                         elif '買轉賣' in kind or kind == 'buy_to_sell':
+2377:                             chip_note = '外資轉賣'
+2384:                 rec = '建議持有／加碼'
+2386:                 rec = '觀察 (持有)'
+2388:                 rec = '建議賣出'
+2392:         st.subheader('目前持股')
+2395:             if st.button('🔎 分析並建議操作（會抓即時資料，較慢）'):
+2401:                     status.text(f'分析 {code} ({i+1}/{len(holdings)})...')
+2408:                 st.success('分析完成')
+2414:             total_cost = float(df_hold['成本(含費)'].sum())
+2415:             total_value = float(df_hold['市值(扣費)'].sum())
+2416:             total_unreal = float(df_hold['未實現損益(元)'].sum())
+2422:         m1.metric('總成本(含費)', f"{total_cost:,.0f} 元")
+2423:         m2.metric('總市值(扣費)', f"{total_value:,.0f} 元", delta=f"{total_unreal:,.0f} 元")
+2424:         m3.metric('未實現淨損益', f"{total_unreal:,.0f} 元", delta=f"{total_pct:.2f}%")
+2425:         m4.metric('持股筆數', f"{len(df_hold)}")
+2431:         if '未實現損益(%)' in df_display.columns:
+2434:         st.subheader('目前持股列表')
+2439:             st.info("尚無持股資料")
+2441:         # 選擇持股以編輯或賣出 (改為支援多筆同代號持股辨識)
+2442:         # 使用 Index 與詳細資訊作為選項
+2448:             n = get_stock_display_name(c).split(' ')[-1] # 簡化名稱
+2453:             # 顯示格式: "1. 2330.TW (2026-02-04 買入 @ $500, 1000股)"
+2454:             label = f"{idx+1}. {c} {n} ({d} 買入 @ {p}, {q}股)"
+2458:         sel_label = st.selectbox('選擇要操作的持股', options=display_options)
+2463:             # 安全檢查
+2466:                 sel_code = selected.get('code') # 取得代號供後續查詢
+2468:                 # 顯示分析/建議（單獨區塊，而非表格欄位）
+2471:                 with st.expander('🔔 分析結果與建議', expanded=True):
+2477:                         if '賣' in rec or '出場' in rec or '建議賣出' in rec:
+2480:                         elif '觀察' in rec or '持有' in rec:
+2498:                                 # 使用統一函式計算
+2503:                                 st.markdown(f"**持股小結：** {selected.get('code')}  {get_stock_display_name(selected.get('code'))}  ")
+2504:                                 st.markdown(f"買入價：{buy_p:.2f}，股數：{qty_p}，最新價：{latest_p:.2f}  ")
+2505:                                 st.markdown(f"未實現：{unreal_p:,.0f} 元 ({pct_p:.2f}%)")
+2509:                             st.markdown('**評分**')
+2515:                         st.markdown('**建議理由**')
+2522:                             st.markdown('無特定理由')
+2524:                         st.info('此持股尚未分析，請按「分析並建議操作」以取得建議。')
+2526:                 # 刪除此持股 (依據 Index 刪除，精確定位)
+2527:                 if st.button('🗑 刪除此持股', type="secondary"):
+2528:                     # 使用 pop 移除特定 index 的持股
+2532:                         st.success(f"已刪除持股: {removed.get('code')} ({removed.get('buy_date')})")
+2535:                 st.markdown('**編輯持股**')
+2539:                         e_buy_date = st.date_input('買入日期', value=pd.to_datetime(selected.get('buy_date')))
+2540:                         e_buy_price = st.number_input('買入價格', value=float(selected.get('buy_price')))
+2542:                         e_qty = st.number_input('股數', value=int(selected.get('qty')), step=1, min_value=1)
+2543:                         e_note = st.text_input('備註', value=selected.get('note',''))
+2544:                     e_save = st.form_submit_button('更新持股')
+2548:                         st.success('已更新持股')
+2550:                 st.markdown('**賣出紀錄 (紀錄為歷史資料)**')
+2554:                         sell_date = st.date_input('賣出日期')
+2555:                         sell_price = st.number_input('賣出價格', min_value=0.0, format='%f')
+2557:                         sell_qty = st.number_input('股數 (預設為持有股數)', value=int(selected.get('qty')), step=1, min_value=1)
+2558:                         sell_note = st.text_input('備註 (選填)')
+2559:                     s_submit = st.form_submit_button('確認賣出並移至歷史')
+2566:                         # 使用統一函式計算賣出損益（僅供紀錄參考，歷史列表會重算）
+2567:                         # 這裡簡單紀錄即可，詳細由 history display handling
+2583:                             # 賣出全部：依據 index 移除該筆持股
+2587:                             # 賣出部分：更新剩餘股數
+2592:                         st.success('已紀錄賣出，並移至歷史資料')
+2596:     # --- 計算歷史總損益 (含費用) ---
+2611:             # 使用統一函式計算歷史損益
+2617:                 '股票代號': code,
+2618:                 '股票名稱': h.get('name',''),
+2619:                 '買入日期': h.get('buy_date'),
+2620:                 '賣出日期': h.get('sell_date'),
+2621:                 '買入單價': b_p,
+2622:                 '賣出單價': s_p,
+2623:                 '股數': q,
+2624:                 '已實現淨損益': realized_net,
+2625:                 '報酬率(%)': log['profit_pct'],
+2626:                 '備註': h.get('note','')
+2629:     # --- 顯示標題與總損益 ---
+2634:     st.markdown(f"### 📜 歷史成交紀錄 <span style='color:{profit_color}; font-size: 0.9em; margin-left: 10px'>(累計已實現損益: {profit_str} 元)</span>", unsafe_allow_html=True)
+2637:         st.info('目前尚無歷史成交紀錄。')
+2640:         # 直接套用樣式（apply_table_style 會處理數值格式與顏色）
+2641:         styled_hist = apply_table_style(df_hist.sort_values(by='賣出日期', ascending=False))
+2644:         # 支援編輯歷史紀錄
+2646:         sel_hist = st.selectbox('選擇要編輯的歷史紀錄 (index | code)', options=['--']+hist_codes)
+2653:                     he_buy_date = st.text_input('買入日期', value=rec.get('buy_date'))
+2654:                     he_buy_price = st.number_input('買入價格', value=float(rec.get('buy_price')))
+2656:                     he_sell_date = st.text_input('賣出日期', value=rec.get('sell_date'))
+2657:                     he_sell_price = st.number_input('賣出價格', value=float(rec.get('sell_price')))
+2658:                 he_note = st.text_input('備註', value=rec.get('note',''))
+2659:                 he_save = st.form_submit_button('更新歷史紀錄')
+2666:                     st.success('已更新歷史紀錄')
+2668:             # 刪除此歷史紀錄
+2669:             if st.button('🗑 刪除此歷史紀錄', type="secondary", key=f"delete_history_{idx}"):
+2672:                 st.success('已刪除該歷史紀錄')
+2677: # ----------------- 頁面 D：觀察清單 -----------------
+2678: elif mode == "⭐ 觀察清單":
+2679:     st.header("⭐ 觀察清單")
+2680:     st.markdown("從「🚀 全自動量化選股 (動態類股版)」選到的標的，可以加入這裡做追蹤與後續體檢。")
+2685:         st.info("目前觀察清單是空的，可以先到「🚀 全自動量化選股」頁面，用動態類股掃描並加入標的。")
+2689:         # 一次請求多檔最新價（帶快取 60 秒）
+2693:         st.subheader("目前觀察清單")
+2694:         # 過多時摺疊：前 10 筆直接顯示，其餘收在「更多」
+2712:                 if st.button("🔍", key=f"{key_prefix}_view_{idx}_{code}", help="檢視個股體檢", use_container_width=True):
+2714:                     st.session_state['previous_page'] = "⭐ 觀察清單"
+2715:                     st.session_state['current_page'] = "🔍 單一個股體檢"
+2718:                 if st.button("🗑", key=f"{key_prefix}_del_{idx}_{code}", help="刪除此股票", use_container_width=True):
+2722:                         st.success(f"已從觀察清單移除：{code} {name}")
+2724:                         st.warning(f"已從清單移除，但寫入檔案失敗，請稍後再試。")
+2731:             with st.expander(f"📂 更多 ({len(more_rows)} 筆)", expanded=False):
+2735: elif mode == "🔍 單一個股體檢":
+2737:     with col_h: st.header("🔍 單一個股深度體檢")
+2740:             st.button("🔙 返回列表", on_click=go_back_logic, type="primary")
+2744:     input_code = st.text_input("輸入代號", value=default_val)
+2750:         # 上方操作按鈕列：加入觀察清單
+2753:             if st.button("⭐ 加入觀察清單", key="single_add_watch"):
+2755:                 st.success(f"已加入觀察清單：{stock_id} {stock_name}")
+2757:             st.write("")  # 預留未來其他操作
+2759:         with st.spinner(f"分析 {stock_id}..."):
+2760:             # 體檢模式：開啟籌碼抓取 (include_chips=True)
+2765:                 st.error("查無資料")

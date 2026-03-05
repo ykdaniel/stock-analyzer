@@ -1,0 +1,104 @@
+def advanced_quant_filter(stock_id, start_date, pre_fetched_df=None):
+    """
+    全自動篩選邏輯（不抓籌碼以求效能）
+    
+    責任：
+    - 只負責資料準備 + 呼叫 strategy_engine
+    - 所有判斷統一由 strategy_engine 輸出
+    - 不再自行判斷買賣點
+    
+    輸出包含完整交易卡片欄位
+    """
+    try:
+        ticker = yf.Ticker(stock_id)
+        try: 
+            info = ticker.info
+        except: 
+            info = {}
+        
+        if pre_fetched_df is not None:
+            df = pre_fetched_df
+        else:
+            df = TechProvider.fetch_data(stock_id, start_date)
+        
+        if df is None: 
+            return None
+        
+        curr = df.iloc[-1]
+        
+        # 基本流動性過濾（可選，不影響 strategy_engine 判斷）
+        vol_ma20 = curr.get('Vol_MA20', 0)
+        if vol_ma20 < 1000000: 
+            return None  # 流動性過低，直接跳過
+
+        # 準備基本面資訊傳給策略引擎
+        pe = info.get('trailingPE', float('inf'))
+        if pe is None: 
+            pe = float('inf')
+        eps = info.get('trailingEps', 0)
+        if eps is None:
+            eps = 0
+        yoy_growth = info.get('earningsGrowth', None)
+        fundamentals = {
+            "PE": pe,
+            "EPS": eps,
+            "Growth": yoy_growth,
+        }
+
+        # 使用策略引擎決定 watch / buy（唯一決策來源）
+        # 傳入 stock_id 和 fundamentals 以支援新功能
+        strat = strategy_engine(df, stock_id, fundamentals)
+        
+        market_regime = strat.get("market_regime", "UNKNOWN")
+        mode = strat.get("mode")
+        signal = strat.get("signal", "NoTrade")
+        watch = bool(strat.get("watch", False))
+        buy = bool(strat.get("buy", False))
+        confidence = strat.get("confidence", 0)
+        reason = strat.get("reason", "")
+        position_level = strat.get("position_level", PositionLevel.NO_POSITION)
+        stop_loss_price = strat.get("stop_loss_price")
+        atr = strat.get("atr")
+        stop_loss_method = strat.get("stop_loss_method")
+        risk_pct = strat.get("risk_pct")
+        exit_conditions = strat.get("exit_conditions", [])
+        not_buy_reasons = strat.get("not_buy_reasons", [])
+        valuation_warning = strat.get("valuation_warning", False)
+
+        # 狀態文字根據 signal
+        if signal == "Buy":
+            status = "✅ Buy"
+        elif signal == "Watch":
+            status = "👀 Watch"
+        elif signal == "Exit":
+            status = "🚪 Exit"
+        else:
+            status = "觀望"
+
+        return {
+            "id": stock_id,
+            "close": curr['Close'],
+            "pe": pe,
+            "rsi": curr.get('RSI', 0),
+            "status": status,
+            "reasons": reason,
+            "watch": watch,
+            "buy": buy,
+            "market_regime": market_regime,
+            "mode": mode,
+            "confidence": confidence,
+            # 新增欄位
+            "signal": signal,
+            "position_level": position_level,
+            "stop_loss_price": stop_loss_price,
+            "atr": atr,
+            "stop_loss_method": stop_loss_method,
+            "risk_pct": risk_pct,
+            "exit_conditions": exit_conditions,
+            "not_buy_reasons": not_buy_reasons,
+            "valuation_warning": valuation_warning,
+        }
+    except Exception as e:
+        logger.debug("advanced_quant_filter error for %s: %s", stock_id, e)
+        return None
+

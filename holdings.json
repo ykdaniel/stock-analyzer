@@ -40,5 +40,33 @@
     "buy_price": 1705.0,
     "qty": 50,
     "note": ""
+  },
+  {
+    "code": "3167.TW",
+    "buy_date": "2026-02-10",
+    "buy_price": 266.0,
+    "qty": 1000,
+    "note": ""
+  },
+  {
+    "code": "3167.TW",
+    "buy_date": "2026-02-10",
+    "buy_price": 270.0,
+    "qty": 1000,
+    "note": ""
+  },
+  {
+    "code": "6770.TW",
+    "buy_date": "2026-02-25",
+    "buy_price": 76.2,
+    "qty": 13000,
+    "note": ""
+  },
+  {
+    "code": "8358.TW",
+    "buy_date": "2026-02-25",
+    "buy_price": 314.0,
+    "qty": 3000,
+    "note": ""
   }
 ]

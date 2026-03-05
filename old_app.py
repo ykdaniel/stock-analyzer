@@ -44,11 +44,7 @@ AI 量化戰情室 - 台股分析系統
 """
 
 
-from core.constants import (
-    SectorType, PositionLevel, POSITION_ORDER,
-    PE_EXPENSIVE_THRESHOLD, PE_REASONABLE_BASE, PE_GROWTH_MULTIPLIER,
-    SECTOR_LIST, STOCK_DB, BAD_TICKERS, EXTRA_SECTORS_FOR_DROPDOWN,
-)
+from core.constants import SectorType, PositionLevel, POSITION_ORDER, PE_EXPENSIVE_THRESHOLD, PE_REASONABLE_BASE, PE_GROWTH_MULTIPLIER, SECTOR_LIST, STOCK_DB
 from core.models import ValuationRequest, RiskAssessment, StrategySignal
 from repository.market_data_repo import MarketDataRepository
 from services.valuation_service import ValuationService
@@ -68,6 +64,7 @@ import os
 import re
 import json
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -119,10 +116,125 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return atr
 
 
+def get_atr(symbol: str, df: pd.DataFrame, date: Any = None) -> Optional[float]:
+    """
+    取得 ATR 值（含快取機制）
+    
+    快取規則：
+    - cache key = (symbol, trading_date)
+    - 同一檔股票、同一交易日只計算一次
+    """
+    if df is None or df.empty:
+        return None
+    
+    # 決定日期（預設使用最後一筆資料的日期）
+    if date is None:
+        date = df.index[-1]
+    
+    try:
+        date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
+    except Exception:
+        date_str = str(date)
+    
+    cache_key = (symbol, date_str)
+    
+    if cache_key in ATR_CACHE:
+        return ATR_CACHE[cache_key]
+    atr_series = calculate_atr(df)
+    if atr_series.empty:
+        return None
+    
+    try:
+        atr_value = float(atr_series.iloc[-1])
+    except Exception:
+        return None
+    
+    # ATR 異常波動防呆：上限鉗制（Hard Cap）
+    # 避免跳空、財報日等極端情況導致停損距離過大
+    if len(atr_series) >= 60:
+        atr_median_60 = float(atr_series.tail(60).median())
+        atr_cap = atr_median_60 * 2.5
+        if atr_value > atr_cap:
+            logger.debug("ATR 超過上限 (%.2f > %.2f)，使用鉗制值", atr_value, atr_cap)
+            atr_value = atr_cap
+    
+    ATR_CACHE[cache_key] = atr_value
+    return atr_value
+
+
+def get_volatility_flag(atr: float, close: float) -> str:
+    """
+    根據 ATR / Close 比例判斷市場波動程度
+    
+    回傳：'Normal' | 'High' | 'Extreme'
+    """
+    if atr is None or close is None or close <= 0:
+        return "Normal"
+    
+    ratio = atr / close
+    if ratio > 0.12:
+        return "Extreme"
+    elif ratio > 0.06:
+        return "High"
+    else:
+        return "Normal"
+
+
+# ==========================================
+# 倉位等級定義（Position Sizing）
+# ==========================================
+# NOTE: 只輸出「等級」，不輸出 %，等級代表風險容忍度
+
+class PositionLevel:
+    NO_POSITION = "No_Position"  # 不建議進場
+    LIGHT = "Light"              # 試單（輕倉）
+    MEDIUM = "Medium"            # 中等倉位
+    HEAVY = "Heavy"              # 重倉
+    FULL = "Full"                # 滿倉（全押）
+
+POSITION_ORDER = [
+    PositionLevel.NO_POSITION,
+    PositionLevel.LIGHT,
+    PositionLevel.MEDIUM,
+    PositionLevel.HEAVY,
+    PositionLevel.FULL,
+]
+
+
+def adjust_position_down(current_level: str) -> str:
+    """將倉位等級往下調整一級"""
+    try:
+        idx = POSITION_ORDER.index(current_level)
+        if idx > 0:
+            return POSITION_ORDER[idx - 1]
+    except ValueError:
+        pass
+    return PositionLevel.NO_POSITION
+
+
 # ==========================================
 # 估值參數設定（Valuation Settings）
 # ==========================================
 # NOTE: EPS > EPS_HIGH_THRESHOLD 且 YoY Growth < 20% → 輸出估值警示
+
+EPS_HIGH_THRESHOLD = 20.0      # EPS 高位警示門檻
+YOY_GROWTH_THRESHOLD = 0.20    # YoY 成長率門檻（20%）
+PE_EXPENSIVE_THRESHOLD = 40    # PE > 40 一律視為「昂貴」
+PE_REASONABLE_BASE = 25        # 基準合理 PE
+PE_GROWTH_MULTIPLIER = 35      # 若成長率 > 30%，合理 PE 可上修至此值
+
+
+def get_reasonable_pe(yoy_growth: Optional[float]) -> float:
+    """
+    動態計算合理 PE 倍數
+    
+    規則：
+    - 若成長率 > 30%，合理倍數上修至 35 倍
+    - 否則基準合理倍數為 25 倍
+    """
+    if yoy_growth is not None and yoy_growth > 0.30:
+        return PE_GROWTH_MULTIPLIER
+    return PE_REASONABLE_BASE
 
 
 def get_valuation_status(pe: Optional[float], eps: Optional[float], yoy_growth: Optional[float]) -> dict:
@@ -162,10 +274,116 @@ def calculate_tradelog(code, buy_price, current_price, qty, fee_discount=1.0):
     return StrategyEngine.calculate_tradelog(code, buy_price, current_price, qty, fee_discount)
 
 # ==========================================
-# 1. 資料庫定義（統一由 core/constants.py 提供）
+# 1. 資料庫定義 (SSOT)
 # ==========================================
-# SectorType, STOCK_DB, SECTOR_LIST, BAD_TICKERS, EXTRA_SECTORS_FOR_DROPDOWN
-# 已於頂部 import，此處不再重複定義。
+class SectorType:
+    SEMI = "半導體/IC設計"
+    AI_PC = "AI/電腦週邊"
+    TRADITIONAL = "傳產/重電/原物料"
+    SHIPPING = "航運"
+    FINANCE = "金融"
+    COMPONENTS = "電子零組件/光電"
+    MEMORY = "記憶體"
+
+STOCK_DB = {
+    # --- 記憶體 (擴充版) ---
+    "2408.TW": {"name": "南亞科", "sector": SectorType.MEMORY},
+    "2344.TW": {"name": "華邦電", "sector": SectorType.MEMORY},
+    "2337.TW": {"name": "旺宏", "sector": SectorType.MEMORY},
+    "8299.TW": {"name": "群聯", "sector": SectorType.MEMORY},
+    "3260.TW": {"name": "威剛", "sector": SectorType.MEMORY},
+    "2451.TW": {"name": "創見", "sector": SectorType.MEMORY},
+    "8271.TW": {"name": "宇瞻", "sector": SectorType.MEMORY},
+    "4967.TW": {"name": "十銓", "sector": SectorType.MEMORY},
+    "3006.TW": {"name": "晶豪科", "sector": SectorType.MEMORY},
+    "3135.TW": {"name": "凌航", "sector": SectorType.MEMORY},
+    "8084.TW": {"name": "巨虹", "sector": SectorType.MEMORY},
+    "8088.TW": {"name": "品安", "sector": SectorType.MEMORY},
+    "4973.TW": {"name": "廣穎", "sector": SectorType.MEMORY},
+    "5386.TW": {"name": "青雲", "sector": SectorType.MEMORY},
+    "8277.TW": {"name": "商丞", "sector": SectorType.MEMORY},
+
+    # --- 半導體 ---
+    "2330.TW": {"name": "台積電", "sector": SectorType.SEMI},
+    "2454.TW": {"name": "聯發科", "sector": SectorType.SEMI},
+    "2303.TW": {"name": "聯電", "sector": SectorType.SEMI},
+    "3711.TW": {"name": "日月光投控", "sector": SectorType.SEMI},
+    "2379.TW": {"name": "瑞昱", "sector": SectorType.SEMI},
+    "3034.TW": {"name": "聯詠", "sector": SectorType.SEMI},
+    "3035.TW": {"name": "智原", "sector": SectorType.SEMI},
+    "3661.TW": {"name": "世芯-KY", "sector": SectorType.SEMI},
+    "6415.TW": {"name": "矽力-KY", "sector": SectorType.SEMI},
+    "3443.TW": {"name": "創意", "sector": SectorType.SEMI},
+    "6515.TW": {"name": "穎崴", "sector": SectorType.SEMI},
+
+    # --- AI/電腦週邊 ---
+    "2317.TW": {"name": "鴻海", "sector": SectorType.AI_PC},
+    "2382.TW": {"name": "廣達", "sector": SectorType.AI_PC},
+    "3231.TW": {"name": "緯創", "sector": SectorType.AI_PC},
+    "6669.TW": {"name": "緯穎", "sector": SectorType.AI_PC},
+    "2357.TW": {"name": "華碩", "sector": SectorType.AI_PC},
+    "3017.TW": {"name": "奇鋐", "sector": SectorType.AI_PC},
+    "2345.TW": {"name": "智邦", "sector": SectorType.AI_PC},
+    "2301.TW": {"name": "光寶科", "sector": SectorType.AI_PC},
+    "3324.TW": {"name": "雙鴻", "sector": SectorType.AI_PC},
+    "2376.TW": {"name": "技嘉", "sector": SectorType.AI_PC},
+    "2368.TW": {"name": "金像電", "sector": SectorType.AI_PC},
+    "2383.TW": {"name": "台光電", "sector": SectorType.AI_PC},
+
+    # --- 傳產/重電 ---
+    "1513.TW": {"name": "中興電", "sector": SectorType.TRADITIONAL},
+    "1519.TW": {"name": "華城", "sector": SectorType.TRADITIONAL},
+    "1503.TW": {"name": "士電", "sector": SectorType.TRADITIONAL},
+    "1504.TW": {"name": "東元", "sector": SectorType.TRADITIONAL},
+    "1605.TW": {"name": "華新", "sector": SectorType.TRADITIONAL},
+    "2002.TW": {"name": "中鋼", "sector": SectorType.TRADITIONAL},
+    "1101.TW": {"name": "台泥", "sector": SectorType.TRADITIONAL},
+    "1301.TW": {"name": "台塑", "sector": SectorType.TRADITIONAL},
+    "1303.TW": {"name": "南亞", "sector": SectorType.TRADITIONAL},
+    "1326.TW": {"name": "台化", "sector": SectorType.TRADITIONAL},
+    "9958.TW": {"name": "世紀鋼", "sector": SectorType.TRADITIONAL},
+    "2014.TW": {"name": "中鴻", "sector": SectorType.TRADITIONAL},
+    "4763.TW": {"name": "材料-KY", "sector": SectorType.TRADITIONAL},
+    "1216.TW": {"name": "統一", "sector": SectorType.TRADITIONAL},
+    "2912.TW": {"name": "統一超", "sector": SectorType.TRADITIONAL},
+    "9910.TW": {"name": "豐泰", "sector": SectorType.TRADITIONAL},
+    "2207.TW": {"name": "和泰車", "sector": SectorType.TRADITIONAL},
+
+    # --- 航運 ---
+    "2603.TW": {"name": "長榮", "sector": SectorType.SHIPPING},
+    "2609.TW": {"name": "陽明", "sector": SectorType.SHIPPING},
+    "2615.TW": {"name": "萬海", "sector": SectorType.SHIPPING},
+    "2618.TW": {"name": "長榮航", "sector": SectorType.SHIPPING},
+    "2610.TW": {"name": "華航", "sector": SectorType.SHIPPING},
+
+    # --- 金融 ---
+    "2881.TW": {"name": "富邦金", "sector": SectorType.FINANCE},
+    "2882.TW": {"name": "國泰金", "sector": SectorType.FINANCE},
+    "2891.TW": {"name": "中信金", "sector": SectorType.FINANCE},
+    "2886.TW": {"name": "兆豐金", "sector": SectorType.FINANCE},
+    "2884.TW": {"name": "玉山金", "sector": SectorType.FINANCE},
+    "2892.TW": {"name": "第一金", "sector": SectorType.FINANCE},
+    "5880.TW": {"name": "合庫金", "sector": SectorType.FINANCE},
+    "2880.TW": {"name": "華南金", "sector": SectorType.FINANCE},
+    "2885.TW": {"name": "元大金", "sector": SectorType.FINANCE},
+    "2883.TW": {"name": "開發金", "sector": SectorType.FINANCE},
+    "2887.TW": {"name": "台新金", "sector": SectorType.FINANCE},
+    "5871.TW": {"name": "中租-KY", "sector": SectorType.FINANCE},
+    "2890.TW": {"name": "永豐金", "sector": SectorType.FINANCE},
+    "5876.TW": {"name": "上海商銀", "sector": SectorType.FINANCE},
+
+    # --- 電子零組件 ---
+    "2308.TW": {"name": "台達電", "sector": SectorType.COMPONENTS},
+    "3037.TW": {"name": "欣興", "sector": SectorType.COMPONENTS},
+    "3008.TW": {"name": "大立光", "sector": SectorType.COMPONENTS},
+    "2327.TW": {"name": "國巨", "sector": SectorType.COMPONENTS},
+    "2412.TW": {"name": "中華電", "sector": SectorType.COMPONENTS},
+    "4904.TW": {"name": "遠傳", "sector": SectorType.COMPONENTS},
+    "3045.TW": {"name": "台灣大", "sector": SectorType.COMPONENTS},
+    "3406.TW": {"name": "玉晶光", "sector": SectorType.COMPONENTS},
+    "6271.TW": {"name": "同欣電", "sector": SectorType.COMPONENTS},
+    "2395.TW": {"name": "研華", "sector": SectorType.COMPONENTS}
+}
 
 # ==========================================
 # 台灣50 成分股（近似版）與「排除金融」版本
@@ -259,65 +477,47 @@ AI_CONCEPT_TICKERS = [
     "6515.TW",  # 穎崴 (探針卡)
 ]
 
+# 動態生成衍生資料
+NAME_MAPPING = {code: data["name"] for code, data in STOCK_DB.items()}
+SECTOR_LIST = defaultdict(list)
+# 移除已知在 yfinance 會 404 或下市的代碼（診斷後判定）
+BAD_TICKERS = set([
+    '8299.TW','3260.TW','8084.TW','8088.TW','4973.TW','5386.TW','8277.TW','3324.TW'
+])
 
-# SECTOR_LIST, BAD_TICKERS, EXTRA_SECTORS_FOR_DROPDOWN 已於頂部 import，此處不再定義。
-# 補充 EXTRA_SECTORS 空槽位到 SECTOR_LIST
+for code, data in STOCK_DB.items():
+    if code in BAD_TICKERS:
+        continue
+    SECTOR_LIST[data["sector"]].append(code)
+SECTOR_LIST = dict(SECTOR_LIST)
+# 補充常見類股名稱到下拉選單（若該類股尚無成分，保留為空列表）
+EXTRA_SECTORS_FOR_DROPDOWN = [
+    "生技/醫療",
+    "綠能/再生能源",
+    "半導體設備",
+    "電動車/電池",
+    "軟體/雲端服務",
+    "光電/面板",
+    "消費性電子",
+    "半導體材料",
+    "不動產/建設",
+    "食品/日用品",
+    "航太/國防",
+]
 for s in EXTRA_SECTORS_FOR_DROPDOWN:
     if s not in SECTOR_LIST:
         SECTOR_LIST[s] = []
 
 FULL_MARKET_DEMO = [c for c in STOCK_DB.keys() if c not in BAD_TICKERS]
 
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _build_twse_name_map() -> dict:
-    """
-    從 TWSE/TPEX 公開 API 抓取全台上市櫃股票名稱對照表，每天只抓一次。
-    回傳 {中文名稱: 代號(.TW)} 的字典。
-    """
-    import requests, urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    name_map = {}
-    try:
-        # 上市
-        r1 = requests.get(
-            "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
-            timeout=10, verify=False
-        )
-        if r1.status_code == 200:
-            for item in r1.json():
-                code = item.get("Code", "")
-                name = item.get("Name", "")
-                if code and name:
-                    name_map[name] = f"{code}.TW"
-    except Exception:
-        pass
-    try:
-        # 上櫃
-        r2 = requests.get(
-            "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes",
-            timeout=10, verify=False
-        )
-        if r2.status_code == 200:
-            for item in r2.json():
-                code = item.get("SecuritiesCompanyCode", "")
-                name = item.get("CompanyAbbreviation", "")
-                if code and name:
-                    name_map[name] = f"{code}.TWO"
-    except Exception:
-        pass
-    return name_map
-
-
 def normalize_stock_id(code: str) -> str:
     """
-    標準化股票代號：支援中文名稱反查，或自動補上 .TW 後綴並轉大寫
-
+    標準化股票代號：自動補上 .TW 後綴並轉大寫
+    
     範例：
-    - "台積電" -> "2330.TW"
-    - "台玻"   -> "1802.TW"  (動態查詢 TWSE)
-    - "2330"   -> "2330.TW"
-    - "2330.TW"-> "2330.TW"
+    - "2330" -> "2330.TW"
+    - "2330.tw" -> "2330.TW"
+    - "2330.TW" -> "2330.TW"
     """
     try:
         if not code or not isinstance(code, str):
@@ -325,31 +525,6 @@ def normalize_stock_id(code: str) -> str:
         s = code.strip()
         if s == '':
             return s
-
-        # 1. 若含有中文，先嘗試名稱反查
-        if not s.replace('.', '').isascii():
-            # --- 1a. 查本地 STOCK_DB (快) ---
-            matched_ticker = None
-            for ticker, info in STOCK_DB.items():
-                name = info.get('name', '')
-                if s == name:
-                    return ticker
-                if s in name and not matched_ticker:
-                    matched_ticker = ticker
-            if matched_ticker:
-                return matched_ticker
-
-            # --- 1b. 查 TWSE 全市場對照表 (慢，但包含全市場) ---
-            twse_map = _build_twse_name_map()
-            # 完全比對
-            if s in twse_map:
-                return twse_map[s]
-            # 部分比對
-            for name, ticker in twse_map.items():
-                if s in name:
-                    return ticker
-
-        # 2. 原始代號邏輯
         if '.' in s:
             parts = s.split('.', 1)
             return parts[0].upper() + '.' + parts[1].upper()
@@ -415,25 +590,32 @@ def apply_table_style(df):
 @st.cache_data(ttl=86400)
 def get_stock_display_name(code: str) -> str:
     """
-    取得股票顯示名稱（以 TWSE 全市場清單為主）：
-    1. TWSE/TPEX 全市場名稱對照表（最完整，每日快取）
-    2. 內建 STOCK_DB（小名單，備援）
-    3. yfinance 英文名稱（最後備援）
+    取得股票顯示名稱（優先中文）：
+    1. 先從內建 STOCK_DB 對照表（中文）
+    2. 再從 FinMind taiwan_stock_info 取得中文名稱
+    3. 若都沒有，最後才用 yfinance 英文名稱
     """
     try:
         if not code:
             return ""
 
-        # 1) TWSE/TPEX 全市場（反查：代號 → 名稱）
-        twse_map = _build_twse_name_map()
-        reversed_map = {v: k for k, v in twse_map.items()}
-        name = reversed_map.get(code)
-        if name:
-            return name
-
-        # 2) 內建 STOCK_DB（備援）
+        # 1) 內建對照表
         if code in STOCK_DB:
             return STOCK_DB[code].get("name", code)
+
+        # 2) FinMind 中文名稱
+        if FINMIND_AVAILABLE:
+            try:
+                df_info = SectorProvider.get_taiwan_stock_info()
+                if df_info is not None and not df_info.empty:
+                    clean = code.split('.')[0]
+                    row = df_info[df_info['stock_id'] == clean]
+                    if not row.empty:
+                        name_tw = row.iloc[0].get('stock_name')
+                        if isinstance(name_tw, str) and name_tw.strip():
+                            return name_tw.strip()
+            except Exception:
+                pass
 
         # 3) yfinance 英文名稱（最後備援）
         try:
@@ -548,21 +730,21 @@ class SectorProvider:
         """取得所有產業類別清單"""
         df = SectorProvider.get_taiwan_stock_info()
         if df is None: return []
-        # 過濾掉空的與不需要的類別（含創新板/創新版及其他非核心板塊）
-        EXCLUDED_SECTORS = {
-            "創新板股票", "創新版股票",
-            "運動休閒", "運動休閒類",
-            "金融保險", "金融業",
-            "鋼鐵工業",
-            "大盤", "存託憑證",
-            "居家生活", "居家生活類",
-            "貿易百貨", "文化創意業",
-            "觀光事業", "觀光餐旅",
-            "農業科技業", "農業科技",
-            "其他電子業", "其他電子類",
-        }
+        # 過濾掉空的與不需要的類別
         sectors = df['industry_category'].dropna().unique().tolist()
-        return sorted([s for s in sectors if s and s not in EXCLUDED_SECTORS])
+        return sorted([s for s in sectors if s])
+
+    @staticmethod
+    def get_stocks_by_sector(sector_name):
+        """取得指定類別的股票代碼列表"""
+        df = SectorProvider.get_taiwan_stock_info()
+        if df is None: return []
+        
+        # 篩選類別
+        subset = df[df['industry_category'] == sector_name]
+        # 只取股票代碼，並轉為 yfinance 格式 (append .TW)
+        codes = subset['stock_id'].tolist()
+        return [normalize_stock_id(c) for c in codes]
 
     @staticmethod
     def get_sector_stocks_info(sector_name):
@@ -826,6 +1008,38 @@ class ChipProvider:
             logger.debug("ChipProvider Error: %s", e)
             return None
 
+@st.cache_data(ttl=300)
+def top_n_by_volume(tickers: List[str], n: int = 10, avg_days: int = 3) -> List[str]:
+    """Return top-n tickers by recent average volume.
+    - tickers: list of symbols like '2330.TW'
+    - n: number to return
+    - avg_days: average over last avg_days days
+    """
+    try:
+        if not tickers:
+            return []
+        period = f"{max(3, avg_days+1)}d"
+        # yfinance supports list of tickers
+        df = yf.download(tickers, period=period, progress=False)
+        if df is None or df.empty:
+            return []
+
+        # get Volume for recent avg_days rows
+        # handle multiindex (multiple tickers) or single
+        if isinstance(df.columns, pd.MultiIndex):
+            vol = df['Volume'].tail(avg_days)
+            avg_vol = vol.mean(axis=0)
+            # avg_vol index might be ticker tuples; convert to strings
+            avg_vol.index = [str(t).upper() for t in avg_vol.index]
+            top = avg_vol.sort_values(ascending=False).head(n).index.tolist()
+            return top
+        else:
+            # single ticker case: df['Volume'] is a Series with index dates
+            # return the single ticker if present
+            return [tickers[0]] if tickers else []
+    except Exception:
+        return []
+
 @st.cache_data(ttl=60)
 def fetch_latest_prices_batch(codes_tuple: tuple) -> Dict[str, Optional[float]]:
     """一次下載多檔最新收盤價，快取 60 秒。參數需為 tuple 以可 hash。"""
@@ -942,15 +1156,808 @@ def analyze_stock(stock_id, start_date, include_chips=False) -> Optional["StockA
         logger.debug("Analyze Error: %s", e)
         return None
 
+# ==========================================
+# 三層式策略架構
+# ==========================================
 
-
-def ma5_breakout_ma10_filter(stock_id, start_date, pre_fetched_df=None):
+def market_regime_gate(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    MA5 突破 MA10 篩選函數
+    Layer 1: 市場開關（Gate）
+    
+    職責：只回答一個問題「現在能不能做多？」
+    只看市場環境，不看個股
+    
+    輸出：
+    {
+        "allow_long": bool,
+        "regime": "BULL" | "NEUTRAL" | "BEAR",
+        "reason": str
+    }
+    """
+    if df is None or df.empty or len(df) < 30:
+        return {
+            "allow_long": False,
+            "regime": "UNKNOWN",
+            "reason": "資料不足，無法判斷市場狀態"
+        }
+    
+    curr = df.iloc[-1]
+    close = float(curr['Close'])
+    ma20 = float(curr.get('MA20', float('nan')))
+    ma60 = float(curr.get('MA60', float('nan')))
+    ma60_slope = float(df['MA60'].diff().tail(5).mean()) if 'MA60' in df.columns else 0.0
+    
+    # 市場狀態判斷（基於指數，這裡先用個股資料，未來可改為大盤指數）
+    if close >= ma60 and ma20 >= ma60 and ma60_slope > 0:
+        regime = "BULL"
+        allow_long = True
+        reason = "多頭市場：指數 > MA60，MA20 > MA60，MA60 上揚"
+    elif close >= ma60:
+        regime = "NEUTRAL"  # 盤整市場
+        allow_long = True  # NEUTRAL 允許做多，但會限制策略模式
+        reason = "盤整市場：指數在 MA60 上方，但趨勢不明"
+    else:
+        regime = "BEAR"
+        allow_long = False
+        reason = "空頭市場：指數跌破 MA60，多頭方向關閉"
+    
+    return {
+        "allow_long": allow_long,
+        "regime": regime,
+        "reason": reason
+    }
+
+
+def select_strategy_mode(df: pd.DataFrame, market_regime: str) -> Dict[str, Any]:
+    """
+    Layer 2: 策略模式選擇（Mode Selector）
+    
+    職責：只決定「用哪種邏輯找股票」（結構分類）
+    不決定買不買，不篩股票
+    
+    Mode A（回檔型）：
+    - 價格接近 MA20 / MA60
+    - 未破前低（前 N 日 Low）
+    - MA60 方向不可下彎
+    
+    Mode B（趨勢型）：
+    - 價格站上 MA20 / MA60
+    - MA60 明確上彎
+    - 非低檔盤整
+    
+    輸出：
+    {
+        "mode": "Trend" | "Pullback" | "NoTrade",  # 內部使用，對應 Mode B/A
+        "reason": str
+    }
+    """
+    if df is None or df.empty or len(df) < 30:
+        return {
+            "mode": "NoTrade",
+            "reason": "資料不足"
+        }
+    
+    if market_regime == "BEAR":
+        return {
+            "mode": "NoTrade",
+            "reason": "空頭市場，不進行交易"
+        }
+    
+    curr = df.iloc[-1]
+    close = float(curr['Close'])
+    ma20 = float(curr.get('MA20', float('nan')))
+    ma60 = float(curr.get('MA60', float('nan')))
+    ma60_slope = float(df['MA60'].diff().tail(5).mean()) if 'MA60' in df.columns else 0.0
+    
+    # Helper: 只取「昨天以前」的連續 n 日視窗，嚴格排除今天
+    def prev_n_days(series: pd.Series, n: int) -> pd.Series:
+        if series is None or len(series) < n + 1:
+            return series.iloc[0:0]
+        return series.iloc[-(n + 1):-1]
+    
+    # Mode B（趨勢型）：價格站上 MA20/MA60，MA60 明確上彎，非低檔盤整
+    price_above_ma20 = close > ma20
+    price_above_ma60 = close >= ma60
+    ma20_above_ma60 = ma20 >= ma60
+    ma60_rising = ma60_slope > 0
+    
+    # 檢查是否為低檔盤整（價格在 MA60 下方但接近）
+    # NOTE: 只有當價格「未站穩」MA60 時才算低檔盤整，避免與 price_above_ma60 衝突
+    is_low_consolidation = (close < ma60) and (close > ma60 * 0.9)
+    
+    if price_above_ma20 and price_above_ma60 and ma20_above_ma60 and ma60_rising and not is_low_consolidation:
+        return {
+            "mode": "Trend",  # 對應 Mode B
+            "reason": "Mode B（趨勢型）：價格站上 MA20/MA60，MA60 上彎，非低檔盤整"
+        }
+    
+    # Mode A（回檔型）：價格接近 MA20/MA60，未破前低，MA60 方向不可下彎
+    price_near_ma20 = abs(close - ma20) / ma20 <= 0.05 if ma20 > 0 else False  # 5% 範圍內
+    price_near_ma60 = abs(close - ma60) / ma60 <= 0.05 if ma60 > 0 else False
+    price_near_ma = price_near_ma20 or price_near_ma60
+    
+    prev10_low = prev_n_days(df['Low'], 10)
+    recent_low_10 = float(prev10_low.min()) if not prev10_low.empty else float('nan')
+    no_new_low = close >= recent_low_10 if not prev10_low.empty else True
+    ma60_not_falling = ma60_slope >= 0  # MA60 不可下彎
+    
+    if price_near_ma and no_new_low and ma60_not_falling:
+        return {
+            "mode": "Pullback",  # 對應 Mode A
+            "reason": "Mode A（回檔型）：價格接近 MA20/MA60，未破前低，MA60 未下彎"
+        }
+    
+    # 不符合任何結構
+    # NOTE: 即使是 NEUTRAL 市場，若不符合 Mode A 條件，也應返回 NoTrade
+    # 避免將不符合結構的股票強制標記為 Pullback 模式
+    return {
+        "mode": "NoTrade",
+        "reason": "不符合 Mode A 或 Mode B 的結構條件" + ("（盤整市場）" if market_regime == "NEUTRAL" else "")
+    }
+
+
+def evaluate_stock(df: pd.DataFrame, market_regime: str, strategy_mode: str, 
+                   stock_id: str = "", fundamentals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Layer 3: 股票篩選（Stock Evaluation）
+    
+    職責：根據選定的 Mode，評估單一股票的 Watch/Buy/Exit 狀態
+    
+    核心原則：
+    - Watch = 結構成立，但尚未出現低風險進場點
+    - Buy = 趨勢型買點 OR 回檔型買點（不被 Watch 硬鎖）
+    - Exit = 防守型出場 OR 趨勢結束 OR 過熱出場
+    - 高檔乖離保護：close/ma60 > MAX_MA60_EXTENSION → Buy 強制 False
+    
+    修正項目：
+    1. NEUTRAL 市場允許做多（Stock Picking/Range Mode）
+    2. KDJ 規則依 Mode 切換
+    3. 補齊 Exit/Sell 條件
+    4. 倉位建議（Position Sizing）
+    5. 動態停損位（ATR 緩衝）
+    6. EPS > 20 僅作警示，不否決 Buy
+    
+    輸出（完整交易卡片）：
+    {
+        "signal": "Buy" | "Watch" | "NoTrade" | "Exit",
+        "mode": str,
+        "market_regime": str,
+        "position_level": str,
+        "entry_price": float,
+        "stop_loss_price": float,
+        "atr": float,
+        "stop_loss_method": str,
+        "risk_pct": float,
+        "exit_conditions": List[str],
+        "not_buy_reasons": List[str],
+        "valuation_warning": bool,
+        "watch": bool,
+        "buy": bool,
+        "confidence": int (0-100),
+        "reason": str
+    }
+    """
+    # 高檔乖離上限（25%）
+    MAX_MA60_EXTENSION = 1.25
+    
+    # ATR 停損緩衝係數
+    ATR_BUFFER_PULLBACK = 0.5  # 回檔模式：Swing_Low - ATR * 0.5
+    ATR_BUFFER_TREND = 1.0     # 趨勢模式：MA20 - ATR * 1.0
+    
+    # 預設輸出結構
+    default_output = {
+        "signal": "NoTrade",
+        "mode": strategy_mode,
+        "market_regime": market_regime,
+        "position_level": PositionLevel.NO_POSITION,
+        "entry_price": None,
+        "stop_loss_price": None,
+        "atr": None,
+        "stop_loss_method": None,
+        "risk_pct": None,
+        "exit_conditions": [],
+        "not_buy_reasons": [],
+        "valuation_warning": False,
+        "watch": False,
+        "buy": False,
+        "confidence": 0,
+        "reason": ""
+    }
+    
+    if df is None or df.empty or len(df) < 30:
+        default_output["reason"] = "資料不足，無法評估"
+        return default_output
+    
+    # Helper: 只取「昨天以前」的連續 n 日視窗，嚴格排除今天
+    def prev_n_days(series: pd.Series, n: int) -> pd.Series:
+        """回傳 series 中，緊鄰「昨天」往前數 n 天的資料視窗。"""
+        if series is None or len(series) < n + 1:
+            return series.iloc[0:0]  # 空視窗
+        return series.iloc[-(n + 1):-1]
+    
+    curr = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else curr
+    close = float(curr['Close'])
+    open_price = float(curr.get('Open', close))
+    high = float(curr.get('High', close))
+    low = float(curr.get('Low', close))
+    ma5 = float(curr.get('MA5', float('nan')))
+    ma10 = float(curr.get('MA10', float('nan')))
+    ma20 = float(curr.get('MA20', float('nan')))
+    ma60 = float(curr.get('MA60', float('nan')))
+    vol = float(curr.get('Volume', 0))
+    vol_ma20 = float(curr.get('Vol_MA20', 0))
+    vol_ma60 = float(curr.get('Vol_MA60', 0))
+    rsi_curr = float(curr.get('RSI', float('nan')))
+    k = float(curr.get('K', float('nan')))
+    d = float(curr.get('D', float('nan')))
+    j = float(curr.get('J', float('nan')))
+    prev_k = float(prev.get('K', float('nan'))) if len(df) > 1 else float('nan')
+    prev_d = float(prev.get('D', float('nan'))) if len(df) > 1 else float('nan')
+    ma60_slope = float(df['MA60'].diff().tail(5).mean()) if 'MA60' in df.columns else 0.0
+    ma20_slope = float(df['MA20'].diff().tail(5).mean()) if 'MA20' in df.columns else 0.0
+    atr = float(curr.get('ATR', float('nan'))) if 'ATR' in curr else None
+    swing_low_10 = float(curr.get('Swing_Low_10', float('nan'))) if 'Swing_Low_10' in curr else None
+    
+    # 基本過濾：流動性
+    liquidity_ok = vol_ma20 > 0
+    if not liquidity_ok:
+        default_output["reason"] = "流動性不足（Vol_MA20 為 0 或過低）"
+        default_output["not_buy_reasons"].append("流動性不足")
+        return default_output
+    
+    # 高檔乖離檢查（用於 Buy 保護）
+    ma60_extension_ratio = close / ma60 if ma60 > 0 else 1.0
+    is_overextended = ma60_extension_ratio > MAX_MA60_EXTENSION
+    
+    # ATR 波動度檢查
+    volatility_flag = get_volatility_flag(atr, close) if atr else "Normal"
+    
+    # ===== 估值警示（不否決 Buy，僅影響倉位建議）=====
+    valuation_warning = False
+    if fundamentals:
+        pe = fundamentals.get('PE', float('inf'))
+        eps = fundamentals.get('EPS', 0)
+        yoy_growth = fundamentals.get('Growth', None)
+        valuation_status = get_valuation_status(pe, eps, yoy_growth)
+        valuation_warning = valuation_status.get("warning", False)
+    
+    # 如果市場不允許做多，直接返回
+    if market_regime == "BEAR":
+        default_output["reason"] = "市場狀態：BEAR，多頭方向關閉"
+        default_output["not_buy_reasons"].append("空頭市場")
+        return default_output
+    
+    # 如果沒有 Mode，無法評估
+    if strategy_mode == "NoTrade":
+        default_output["reason"] = "不符合 Mode A 或 Mode B 的結構條件"
+        default_output["not_buy_reasons"].append("不符合交易結構")
+        return default_output
+    
+    watch = False
+    buy = False
+    watch_reason_parts = []
+    buy_reason_parts = []
+    not_buy_reasons = []
+    exit_conditions = []
+    
+    # ===== KDJ 規則依 Mode 切換（修正 #3）=====
+    # NOTE: KDJ 是「建議性條件」，不會完全阻擋 Buy，但會影響信心度
+    kdj_check_ok = True
+    kdj_ideal = False  # 理想的 KDJ 條件
+    kdj_reason = ""
+    
+    if strategy_mode == "Pullback":
+        # 回檔模式：理想條件是 D <= 40 AND K >= D（低檔買入）
+        if not pd.isna(k) and not pd.isna(d):
+            if d <= 40 and k >= d:
+                kdj_ideal = True
+                kdj_reason = "KDJ 符合回檔買入條件（D <= 40, K >= D）"
+            elif d <= 50 and k >= d:
+                # 次佳條件：D 在 50 以下且 K > D，仍可考慮
+                kdj_ideal = False
+                kdj_reason = f"KDJ 尚可（D={d:.1f}，K >= D），非最佳時機"
+            elif d > 50:
+                # 高檔區不適合回檔買入，但不硬性阻擋
+                kdj_ideal = False
+                kdj_reason = f"KDJ D 值偏高（{d:.1f}），回檔買入風險較高"
+            else:
+                kdj_ideal = False
+                kdj_reason = f"KDJ K < D（{k:.1f} < {d:.1f}），尚未金叉"
+    elif strategy_mode == "Trend":
+        # 趨勢模式：避免高檔死叉（K < D AND D falling）
+        if not pd.isna(k) and not pd.isna(d) and not pd.isna(prev_d):
+            d_falling = d < prev_d
+            if k < d and d_falling:
+                # 高檔死叉是明確的賣出訊號，應該阻擋 Buy
+                kdj_check_ok = False
+                kdj_reason = f"KDJ 高檔死叉（K:{k:.1f} < D:{d:.1f}，D 下滑）"
+            else:
+                kdj_check_ok = True
+                kdj_ideal = True
+                kdj_reason = "KDJ 未出現高檔死叉"
+    
+    # ===== Watch 判定：結構成立，但尚未出現低風險進場點 =====
+    # 修正 #1: NEUTRAL 市場也允許 Watch/Buy
+    if market_regime in ["BULL", "NEUTRAL"]:
+        if strategy_mode == "Trend":  # Mode B
+            # Mode B Watch: 趨勢結構成立，但未出現明確進場觸發
+            price_above_ma20 = close > ma20
+            price_above_ma60 = close >= ma60
+            ma20_above_ma60 = ma20 >= ma60
+            ma60_rising = ma60_slope > 0
+            no_structure_break = price_above_ma60  # 未破 MA60
+            
+            # NEUTRAL 市場放寬 MA60 上揚條件
+            if market_regime == "NEUTRAL":
+                ma60_rising = ma60_slope >= 0  # 允許走平
+            
+            if price_above_ma20 and price_above_ma60 and ma20_above_ma60 and ma60_rising and no_structure_break:
+                watch = True
+                if is_overextended:
+                    watch_reason_parts.append("Mode B 趨勢股，但高檔整理中（等待回測或放量突破）")
+                else:
+                    watch_reason_parts.append("Mode B 趨勢股，結構完整，等待進場觸發")
+        
+        elif strategy_mode == "Pullback":  # Mode A
+            # Mode A Watch: 回檔結構成立，但未出現止跌訊號
+            price_above_ma60 = close >= ma60
+            prev10_close = prev_n_days(df['Close'], 10)
+            recent_low_close = float(prev10_close.min()) if not prev10_close.empty else float('nan')
+            no_new_low = close >= recent_low_close if not prev10_close.empty else True
+            no_structure_break = price_above_ma60  # 未破 MA60
+            
+            if price_above_ma60 and no_new_low and no_structure_break:
+                watch = True
+                watch_reason_parts.append("Mode A 回檔型，結構完整，等待止跌訊號")
+    
+    # ===== Buy 判定：嚴格的事件觸發 =====
+    # 修正 #2: Buy = Trend_Buy OR Pullback_Buy（不被 Watch 硬鎖）
+    # 但仍需高檔乖離保護和 KDJ 檢查
+    can_buy = not is_overextended and kdj_check_ok
+    
+    if not kdj_check_ok:
+        not_buy_reasons.append(kdj_reason)
+    if is_overextended:
+        not_buy_reasons.append(f"高檔乖離 {ma60_extension_ratio:.1%} > 25%")
+    if volatility_flag == "Extreme":
+        can_buy = False
+        not_buy_reasons.append(f"波動度 Extreme（ATR/Price > 12%）")
+    
+    if can_buy:
+        if strategy_mode == "Trend":  # Mode B
+            # Mode B Buy: 突破型 或 回測型（二選一）
+            prev10_high = prev_n_days(df['High'], 10)
+            recent_high_10 = float(prev10_high.max()) if not prev10_high.empty else float('nan')
+            
+            # 突破型觸發
+            breakout_trigger = (
+                close > recent_high_10 and  # 條件1：突破前10日高（不含今日）
+                vol >= vol_ma20 * 1.5       # 條件2：量能放大 ≥ 1.5×
+            )
+            
+            # 回測型觸發
+            pullback_to_ma20 = abs(close - ma20) / ma20 <= 0.02 if ma20 > 0 else False  # 2% 範圍內
+            pullback_to_ma10 = abs(close - ma10) / ma10 <= 0.02 if ma10 > 0 else False
+            volume_shrink = vol < vol_ma20 * 0.8  # 量縮
+            bullish_candle = close > open_price  # 紅K
+            long_lower_shadow = (close - low) / (high - low) > 0.5 if high > low else False  # 下影線長
+            
+            pullback_trigger = (
+                (pullback_to_ma20 or pullback_to_ma10) and  # 條件1：回測 MA20/MA10 不破
+                volume_shrink and                            # 條件2：量縮
+                (bullish_candle or long_lower_shadow)        # 條件3：紅K 或 長下影線
+            )
+            
+            if breakout_trigger:
+                buy = True
+                watch = True  # Buy 必然也是 Watch
+                buy_reason_parts.append("Mode B 突破觸發：收盤價創近10日新高且量能放大 ≥ 1.5×20日均量")
+            elif pullback_trigger:
+                buy = True
+                watch = True
+                buy_reason_parts.append("Mode B 回測觸發：回測 MA20/MA10 不破，量縮，出現止跌訊號")
+        
+        elif strategy_mode == "Pullback":  # Mode A
+            # Mode A Buy: 必須同時成立（嚴格條件）
+            prev10_close = prev_n_days(df['Close'], 10)
+            recent_low_close = float(prev10_close.min()) if not prev10_close.empty else float('nan')
+            
+            # 條件1：價格 ≥ 前10日最低 Close（不含今日）
+            price_above_recent_low = close >= recent_low_close if not prev10_close.empty else True
+            
+            # 條件2：出現止跌訊號（紅K、量縮止跌、KD 反轉等，至少滿足一項）
+            bullish_candle = close > open_price  # 紅K
+            volume_shrink = vol < vol_ma20 * 0.8  # 量縮止跌
+            kd_reversal = (k > d) and (prev_k <= prev_d) if not (pd.isna(k) or pd.isna(d) or pd.isna(prev_k) or pd.isna(prev_d)) else False
+            rsi_rebound = rsi_curr > 40 and rsi_curr < 60  # RSI 在合理區間反彈
+            
+            has_reversal_signal = bullish_candle or volume_shrink or kd_reversal or rsi_rebound
+            
+            # 條件3：價格未跌破 MA60
+            price_not_below_ma60 = close >= ma60
+            
+            if price_above_recent_low and has_reversal_signal and price_not_below_ma60:
+                buy = True
+                watch = True
+                buy_reason_parts.append("Mode A 止跌觸發：價格 ≥ 前10日低點，出現止跌訊號，未破 MA60")
+    
+    # ===== Exit 條件檢查（修正 #4）=====
+    # NOTE: Exit 條件是給「已持有部位」的參考，不影響 Buy 判斷
+    # 只有在 Trend 模式或已經 Watch 的情況下才檢查防守出場
+    
+    # Exit_Defensive: 僅對 Trend 模式檢查（Pullback 本來就在低檔）
+    if strategy_mode == "Trend":
+        if close < ma5:
+            exit_conditions.append("短線轉弱：收盤價跌破 MA5 (攻擊暫歇)")
+        if close < ma10:
+            exit_conditions.append("防守出場：收盤價跌破 MA10 (波段警戒)")
+        if close < ma20:
+            exit_conditions.append("趨勢破壞：收盤價跌破 MA20 (生命線)")
+    
+    # Exit_Trend_End: 趨勢結構破壞（對所有模式都重要）
+    if ma20_slope < 0 and strategy_mode == "Trend":
+        exit_conditions.append("趨勢結束：MA20 下彎")
+    if ma20 < ma60 and close < ma60:
+        # 只有當 MA20 和價格都跌破 MA60 時才算趨勢結束
+        exit_conditions.append("趨勢結束：MA20 跌破 MA60 且價格破季線")
+    
+    # Exit_Overheat: RSI > 80 OR KDJ 高檔死叉（對所有模式都適用）
+    if not pd.isna(rsi_curr) and rsi_curr > 80:
+        exit_conditions.append("過熱出場：RSI > 80")
+    if not pd.isna(k) and not pd.isna(d) and not pd.isna(prev_k) and not pd.isna(prev_d):
+        if k > 80 and d > 80 and k < d and prev_k >= prev_d:
+            exit_conditions.append("過熱出場：KDJ 高檔死叉")
+    
+    # ===== 高檔乖離保護：補充 Watch 理由 =====
+    if is_overextended and watch:
+        watch_reason_parts.append("（高檔乖離 > 25%，僅可觀察，不可買進）")
+    
+    # ===== 倉位建議（Position Sizing）=====
+    position_level = PositionLevel.NO_POSITION
+    
+    if buy:
+        if market_regime == "BULL" and strategy_mode == "Trend":
+            position_level = PositionLevel.HEAVY
+        elif market_regime == "BULL" and strategy_mode == "Pullback":
+            position_level = PositionLevel.MEDIUM
+        elif market_regime == "NEUTRAL":
+            position_level = PositionLevel.LIGHT
+        else:
+            position_level = PositionLevel.LIGHT
+        
+        # 估值警示降倉
+        if valuation_warning:
+            position_level = adjust_position_down(position_level)
+            not_buy_reasons.append("估值警示：已降低建議倉位")
+        
+        # 波動度過高降倉
+        if volatility_flag == "High":
+            position_level = adjust_position_down(position_level)
+            not_buy_reasons.append("高波動：已降低建議倉位")
+    elif watch:
+        position_level = PositionLevel.NO_POSITION  # 觀察中不建議進場
+    
+    # ===== 動態停損位計算 =====
+    stop_loss_price = None
+    stop_loss_method = None
+    risk_pct = None
+    
+    if buy and atr and not pd.isna(atr):
+        if strategy_mode == "Pullback":
+            # 回檔模式：Swing_Low - ATR * buffer_k
+            base_stop = swing_low_10 if swing_low_10 and not pd.isna(swing_low_10) else low
+            stop_loss_price = base_stop - atr * ATR_BUFFER_PULLBACK
+            stop_loss_method = "Swing_Low - ATR"
+        elif strategy_mode == "Trend":
+            # 趨勢模式：MA20 - ATR * buffer_n
+            base_stop = ma20
+            stop_loss_price = base_stop - atr * ATR_BUFFER_TREND
+            stop_loss_method = "MA20 - ATR"
+        
+        if stop_loss_price and close > 0:
+            risk_pct = (close - stop_loss_price) / close * 100
+    
+    # ===== 決定最終訊號 =====
+    if len(exit_conditions) > 0 and not buy:
+        signal = "Exit"
+    elif buy:
+        signal = "Buy"
+    elif watch:
+        signal = "Watch"
+    else:
+        signal = "NoTrade"
+    
+    # Confidence 計算
+    confidence = 0
+    if watch:
+        confidence += 40
+    if buy:
+        confidence += 40
+    if market_regime == "BULL":
+        confidence += 20
+    elif market_regime == "NEUTRAL":
+        confidence += 10
+    # KDJ 條件對信心度的影響
+    if kdj_ideal:
+        confidence += 10  # 理想 KDJ 條件加分
+    elif kdj_check_ok:
+        confidence += 5   # KDJ 可接受
+    else:
+        confidence -= 10  # KDJ 不佳扣分
+    confidence = max(0, min(100, confidence))
+    
+    # 組合理由
+    reason_parts = []
+    if watch:
+        reason_parts.extend(watch_reason_parts)
+    if buy:
+        reason_parts.extend(buy_reason_parts)
+    # 顯示 KDJ 理由（無論條件是否理想）
+    if kdj_reason:
+        reason_parts.append(kdj_reason)
+    reason = "；".join(reason_parts) if reason_parts else "不符合任何條件"
+    
+    return {
+        "signal": signal,
+        "mode": strategy_mode,
+        "market_regime": market_regime,
+        "position_level": position_level,
+        "entry_price": close if buy else None,
+        "stop_loss_price": round(stop_loss_price, 2) if stop_loss_price else None,
+        "atr": round(atr, 2) if atr and not pd.isna(atr) else None,
+        "stop_loss_method": stop_loss_method,
+        "risk_pct": round(risk_pct, 2) if risk_pct else None,
+        "exit_conditions": exit_conditions,
+        "not_buy_reasons": not_buy_reasons,
+        "valuation_warning": valuation_warning,
+        "watch": watch,
+        "buy": buy,
+        "confidence": confidence,
+        "reason": reason
+    }
+
+
+def strategy_engine(df: pd.DataFrame, stock_id: str = "", fundamentals: Optional[Dict[str, Any]] = None) -> Dict:
+    """
+    策略引擎 - 三層式架構整合
+    
+    Layer 1: 市場開關（Gate）- 判斷是否允許做多
+    Layer 2: 策略模式選擇（Mode Selector）- 決定用哪套邏輯
+    Layer 3: 股票評估（Stock Evaluation）- 產生完整交易卡片
+    
+    輸出格式（完整交易卡片）：
+    {
+        "signal": "Buy" | "Watch" | "NoTrade" | "Exit",
+        "mode": str,
+        "market_regime": str,
+        "position_level": str,
+        "entry_price": float,
+        "stop_loss_price": float,
+        "atr": float,
+        "stop_loss_method": str,
+        "risk_pct": float,
+        "exit_conditions": List[str],
+        "not_buy_reasons": List[str],
+        "valuation_warning": bool,
+        "watch": bool,
+        "buy": bool,
+        "confidence": int (0-100),
+        "reason": str
+    }
+    """
+    # 預設輸出結構
+    default_output = {
+        "signal": "NoTrade",
+        "mode": "NoTrade",
+        "market_regime": "UNKNOWN",
+        "position_level": PositionLevel.NO_POSITION,
+        "entry_price": None,
+        "stop_loss_price": None,
+        "atr": None,
+        "stop_loss_method": None,
+        "risk_pct": None,
+        "exit_conditions": [],
+        "not_buy_reasons": [],
+        "valuation_warning": False,
+        "watch": False,
+        "buy": False,
+        "confidence": 0,
+        "reason": "",
+        # 向後兼容欄位
+        "regime": "UNKNOWN",
+        "status": "",
+        "reasons": [],
+    }
+    
+    if df is None or df.empty or len(df) < 30:
+        default_output["reason"] = "資料不足，無法判斷"
+        default_output["status"] = default_output["reason"]
+        default_output["reasons"] = [default_output["reason"]]
+        return default_output
+    
+    # Layer 1: 市場開關
+    gate_result = market_regime_gate(df)
+    allow_long = gate_result["allow_long"]
+    market_regime = gate_result["regime"]
+    
+    if not allow_long:
+        return {
+            **default_output,
+            "market_regime": market_regime,
+            "reason": gate_result["reason"],
+            # 向後兼容欄位
+            "regime": market_regime,
+            "signal": "NoTrade",
+            "status": gate_result["reason"],
+            "reasons": [gate_result["reason"]],
+            "not_buy_reasons": ["空頭市場：多頭方向關閉"],
+        }
+    
+    # Layer 2: 策略模式選擇
+    mode_result = select_strategy_mode(df, market_regime)
+    strategy_mode = mode_result["mode"]
+    
+    if strategy_mode == "NoTrade":
+        return {
+            **default_output,
+            "market_regime": market_regime,
+            "mode": "NoTrade",
+            "reason": mode_result["reason"],
+            # 向後兼容欄位
+            "regime": market_regime,
+            "signal": "NoTrade",
+            "status": mode_result["reason"],
+            "reasons": [mode_result["reason"]],
+            "not_buy_reasons": ["不符合交易結構"],
+        }
+    
+    # Layer 3: 股票評估（傳入新參數）
+    eval_result = evaluate_stock(df, market_regime, strategy_mode, stock_id, fundamentals)
+    
+    # 模式名稱映射（向後兼容：Trend -> B, Pullback -> A）
+    mode_display = "B" if strategy_mode == "Trend" else "A"
+    
+    # 決定向後兼容的 signal 欄位
+    signal_compat = eval_result.get("signal", "NoTrade").lower()
+    if signal_compat == "notrade":
+        signal_compat = "none"
+    
+    return {
+        # 新格式欄位
+        "signal": eval_result.get("signal", "NoTrade"),
+        "mode": mode_display,  # 向後兼容：顯示 A/B
+        "market_regime": market_regime,
+        "position_level": eval_result.get("position_level", PositionLevel.NO_POSITION),
+        "entry_price": eval_result.get("entry_price"),
+        "stop_loss_price": eval_result.get("stop_loss_price"),
+        "atr": eval_result.get("atr"),
+        "stop_loss_method": eval_result.get("stop_loss_method"),
+        "risk_pct": eval_result.get("risk_pct"),
+        "exit_conditions": eval_result.get("exit_conditions", []),
+        "not_buy_reasons": eval_result.get("not_buy_reasons", []),
+        "valuation_warning": eval_result.get("valuation_warning", False),
+        "watch": eval_result.get("watch", False),
+        "buy": eval_result.get("buy", False),
+        "confidence": eval_result.get("confidence", 0),
+        "reason": eval_result.get("reason", ""),
+        # 向後兼容欄位
+        "regime": market_regime,
+        "status": eval_result.get("reason", ""),
+        "reasons": [eval_result.get("reason", "")],
+    }
+
+def advanced_quant_filter(stock_id, start_date, pre_fetched_df=None):
+    """
+    全自動篩選邏輯（不抓籌碼以求效能）
+    
+    責任：
+    - 只負責資料準備 + 呼叫 strategy_engine
+    - 所有判斷統一由 strategy_engine 輸出
+    - 不再自行判斷買賣點
+    
+    輸出包含完整交易卡片欄位
+    """
+    try:
+        ticker = yf.Ticker(stock_id)
+        try: 
+            info = ticker.info
+        except: 
+            info = {}
+        
+        if pre_fetched_df is not None:
+            df = pre_fetched_df
+        else:
+            df = TechProvider.fetch_data(stock_id, start_date)
+        
+        if df is None: 
+            return None
+        
+        curr = df.iloc[-1]
+        
+        # 基本流動性過濾（可選，不影響 strategy_engine 判斷）
+        vol_ma20 = curr.get('Vol_MA20', 0)
+        if vol_ma20 < 1000000: 
+            return None  # 流動性過低，直接跳過
+
+        # 準備基本面資訊傳給策略引擎
+        pe = info.get('trailingPE', float('inf'))
+        if pe is None: 
+            pe = float('inf')
+        eps = info.get('trailingEps', 0)
+        if eps is None:
+            eps = 0
+        yoy_growth = info.get('earningsGrowth', None)
+        fundamentals = {
+            "PE": pe,
+            "EPS": eps,
+            "Growth": yoy_growth,
+        }
+
+        # 使用策略引擎決定 watch / buy（唯一決策來源）
+        # 傳入 stock_id 和 fundamentals 以支援新功能
+        strat = strategy_engine(df, stock_id, fundamentals)
+        
+        market_regime = strat.get("market_regime", "UNKNOWN")
+        mode = strat.get("mode")
+        signal = strat.get("signal", "NoTrade")
+        watch = bool(strat.get("watch", False))
+        buy = bool(strat.get("buy", False))
+        confidence = strat.get("confidence", 0)
+        reason = strat.get("reason", "")
+        position_level = strat.get("position_level", PositionLevel.NO_POSITION)
+        stop_loss_price = strat.get("stop_loss_price")
+        atr = strat.get("atr")
+        stop_loss_method = strat.get("stop_loss_method")
+        risk_pct = strat.get("risk_pct")
+        exit_conditions = strat.get("exit_conditions", [])
+        not_buy_reasons = strat.get("not_buy_reasons", [])
+        valuation_warning = strat.get("valuation_warning", False)
+
+        # 狀態文字根據 signal
+        if signal == "Buy":
+            status = "✅ Buy"
+        elif signal == "Watch":
+            status = "👀 Watch"
+        elif signal == "Exit":
+            status = "🚪 Exit"
+        else:
+            status = "觀望"
+
+        return {
+            "id": stock_id,
+            "close": curr['Close'],
+            "pe": pe,
+            "rsi": curr.get('RSI', 0),
+            "status": status,
+            "reasons": reason,
+            "watch": watch,
+            "buy": buy,
+            "market_regime": market_regime,
+            "mode": mode,
+            "confidence": confidence,
+            # 新增欄位
+            "signal": signal,
+            "position_level": position_level,
+            "stop_loss_price": stop_loss_price,
+            "atr": atr,
+            "stop_loss_method": stop_loss_method,
+            "risk_pct": risk_pct,
+            "exit_conditions": exit_conditions,
+            "not_buy_reasons": not_buy_reasons,
+            "valuation_warning": valuation_warning,
+        }
+    except Exception as e:
+        logger.debug("advanced_quant_filter error for %s: %s", stock_id, e)
+        return None
+
+def ma5_breakout_ma20_filter(stock_id, start_date, pre_fetched_df=None):
+    """
+    MA5 突破 MA20 篩選函數
     
     條件：
     1. 股價站上5日線（close > MA5）
-    2. 5日線突破10日線（前一日 MA5 <= MA10，當日 MA5 > MA10）
+    2. 5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）
     """
     try:
         ticker = yf.Ticker(stock_id)
@@ -974,23 +1981,20 @@ def ma5_breakout_ma10_filter(stock_id, start_date, pre_fetched_df=None):
         close = float(curr['Close'])
         ma5_curr = float(curr.get('MA5', float('nan')))
         ma5_prev = float(prev.get('MA5', float('nan')))
-        ma10_curr = float(curr.get('MA10', float('nan')))
-        ma10_prev = float(prev.get('MA10', float('nan')))
+        ma20_curr = float(curr.get('MA20', float('nan')))
+        ma20_prev = float(prev.get('MA20', float('nan')))
         
         # 檢查是否有 NaN
-        if pd.isna(ma5_curr) or pd.isna(ma5_prev) or pd.isna(ma10_curr) or pd.isna(ma10_prev):
+        if pd.isna(ma5_curr) or pd.isna(ma5_prev) or pd.isna(ma20_curr) or pd.isna(ma20_prev):
             return None
         
         # 條件1：股價站上5日線
         condition1 = close > ma5_curr
         
-        # 條件2：股價站上10日線
-        condition2 = close > ma10_curr
-
-        # 條件3：5日線突破10日線（前一日 MA5 <= MA10，當日 MA5 > MA10）
-        condition3 = (ma5_prev <= ma10_prev) and (ma5_curr > ma10_curr)
+        # 條件2：5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）
+        condition2 = (ma5_prev <= ma20_prev) and (ma5_curr > ma20_curr)
         
-        if condition1 and condition2 and condition3:
+        if condition1 and condition2:
             # 基本面資訊（僅供參考）
             pe = info.get('trailingPE', float('inf'))
             if pe is None: 
@@ -1000,7 +2004,7 @@ def ma5_breakout_ma10_filter(stock_id, start_date, pre_fetched_df=None):
                 "id": stock_id,
                 "close": close,
                 "ma5": ma5_curr,
-                "ma10": ma10_curr,
+                "ma20": ma20_curr,
                 "pe": pe,
                 "rsi": curr.get('RSI', 0),
                 "status": "✅ 符合條件",
@@ -1008,68 +2012,11 @@ def ma5_breakout_ma10_filter(stock_id, start_date, pre_fetched_df=None):
         else:
             return None
     except Exception as e:
-        logger.debug("ma5_breakout_ma10_filter error for %s: %s", stock_id, e)
+        logger.debug("ma5_breakout_ma20_filter error for %s: %s", stock_id, e)
         return None
 
 # ==========================================
-# 5. 策略轉譯層 (Adapter)
-# ==========================================
-def strategy_engine(df, stock_id, fundamentals, df_chips=None):
-    from core.models import ValuationRequest
-    pe = fundamentals.get("PE") if fundamentals else None
-    eps = fundamentals.get("EPS") if fundamentals else None
-    growth = fundamentals.get("Growth") if fundamentals else None
-    val_req = ValuationRequest(pe=pe, eps=eps, yoy_growth=growth)
-    
-    # 為了讓策略引擎能讀到外資籌碼，將 df_chips 的 Net_Buy 合併入 df
-    eval_df = df.copy()
-    if df_chips is not None and not df_chips.empty and 'Net_Buy' in df_chips.columns:
-        # 使用索引對齊，填補空缺值
-        chip_col = df_chips['Net_Buy'].reindex(eval_df.index).ffill()
-        eval_df['Net_Buy'] = chip_col
-        
-    signal = StrategyEngine.advanced_quant_filter(eval_df, val_req)
-    return signal.model_dump() if signal else {}
-
-def advanced_quant_filter(stock_id, start_date, pre_fetched_df=None):
-    try:
-        ticker = yf.Ticker(stock_id)
-        info = getattr(ticker, "info", {}) or {}
-        
-        df = pre_fetched_df if pre_fetched_df is not None else TechProvider.fetch_data(stock_id, start_date)
-        if df is None: return None
-        curr = df.iloc[-1]
-        
-        vol_ma20 = curr.get('Vol_MA20', 0)
-        if vol_ma20 < 1000000: return None
-        
-        pe = info.get('trailingPE', float('inf'))
-        if pe is None: pe = float('inf')
-        eps = info.get('trailingEps', 0)
-        if eps is None: eps = 0
-        yoy_growth = info.get('earningsGrowth', None)
-        
-        fundamentals = {"PE": pe, "EPS": eps, "Growth": yoy_growth}
-        # 動能掃描目前不抓籌碼 (為求速度)，所以 df_chips = None
-        strat = strategy_engine(df, stock_id, fundamentals, df_chips=None)
-        
-        signal = strat.get("signal", "NoTrade")
-        status = "✅ Buy" if signal == "Buy" else "👀 Watch" if signal == "Watch" else "🚪 Exit" if signal == "Exit" else "觀望"
-        
-        strat.update({
-            "id": stock_id,
-            "close": curr['Close'],
-            "pe": pe,
-            "rsi": curr.get('RSI', 0),
-            "status": status,
-        })
-        return strat
-    except Exception as e:
-        logger.debug("advanced_quant_filter error for %s: %s", stock_id, e)
-        return None
-
-# ==========================================
-# 6. 視圖層 (View / UI)
+# 5. 視圖層 (View / UI)
 # ==========================================
 def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     st.markdown(f"## 🏥 {stock_name} ({stock_id}) 深度投資體檢報告")
@@ -1082,7 +2029,7 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
 
     # 🧠 策略引擎總結區塊（傳入完整參數以支援新功能）
     try:
-        engine = strategy_engine(df, stock_id, fundamentals, df_chips=df_chips)
+        engine = strategy_engine(df, stock_id, fundamentals)
     except Exception as e:
         logger.debug("strategy_engine error: %s", e)
         engine = {
@@ -1121,243 +2068,158 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     valuation_warning = engine.get("valuation_warning", False)
 
     st.subheader("🧠 策略引擎判斷 (完整交易卡片)")
-
-    # ─────────────────────────────────────────────────────
-    # 訊號徽章顏色設定
-    # ─────────────────────────────────────────────────────
-    if signal == "Buy":
-        sig_color = "#00C851"
-        sig_bg    = "rgba(0,200,81,0.12)"
-        sig_border= "#00C851"
-        sig_emoji = "✅"
-        sig_label = "BUY  進場訊號"
-        sig_desc  = "條件完整，可執行交易"
-    elif signal == "Watch":
-        sig_color = "#FFB300"
-        sig_bg    = "rgba(255,179,0,0.12)"
-        sig_border= "#FFB300"
-        sig_emoji = "👀"
-        sig_label = "WATCH  觀察候補"
-        sig_desc  = "結構成立，等待觸發"
-    elif signal == "Exit":
-        sig_color = "#FF4B4B"
-        sig_bg    = "rgba(255,75,75,0.12)"
-        sig_border= "#FF4B4B"
-        sig_emoji = "🚪"
-        sig_label = "EXIT  出場警示"
-        sig_desc  = "建議考慮出場或減碼"
-    else:
-        sig_color = "#000000"
-        sig_bg    = "rgba(0,0,0,0.18)"
-        sig_border= "#000000"
-        sig_emoji = "⏸️"
-        sig_label = "NO TRADE  觀望"
-        sig_desc  = "市場結構尚未符合條件"
-
-    # 市場狀態文案
-    regime_map = {
-        "BULL": ("📈", "BULL 多頭市場", "#00C851"),
-        "NEUTRAL": ("📊", "NEUTRAL 盤整市場", "#FFB300"),
-        "BEAR": ("📉", "BEAR 空頭市場", "#FF4B4B"),
-    }
-    regime_icon, regime_txt, regime_clr = regime_map.get(
-        market_regime, ("❓", "未知", "#000")
-    )
-
-    # 模式文案
-    mode_display = {"Trend": "Mode B（趨勢追蹤）", "Pullback": "Mode A（回檔買入）", "NoTrade": "N/A"}.get(mode or "", f"Mode {mode or 'N/A'}")
-
-    # 倉位等級中文
-    pos_map = {
-        "NO_POSITION": ("⬜", "不建議進場", "#000000"),
-        "LIGHT": ("🟡", "輕倉", "#FFB300"),
-        "MEDIUM": ("🟠", "標準倉", "#FF8C00"),
-        "HEAVY": ("🔴", "重倉", "#FF4B4B"),
-        "FULL": ("🔥", "滿倉", "#C62828"),
-    }
-    # 從 Enum 取出 name (e.g. "NO_POSITION")，fallback to str 去掉前缀
-    if hasattr(position_level, "name"):
-        pos_key = position_level.name  # Python Enum: .name = "NO_POSITION"
-    else:
-        raw = str(position_level)
-        pos_key = raw.split(".")[-1] if "." in raw else raw  # "PositionLevel.NO_POSITION" → "NO_POSITION"
-    pos_icon, pos_txt, pos_clr = pos_map.get(pos_key, ("⬜", pos_key, "#9E9E9E"))
-
-
-    # ─── 主訊號徽章 ───────────────────────────────────────
-    entry_price = engine.get("entry_price", float(curr['Close']))
     
-    st.markdown(f"""
-    <div style="
-        background:{sig_bg};
-        border:2px solid {sig_border};
-        border-radius:16px;
-        padding:20px 24px;
-        margin-bottom:16px;
-        display:flex;
-        align-items:center;
-        gap:20px;
-    ">
-        <div style="font-size:3.2rem;line-height:1">{sig_emoji}</div>
-        <div style="flex:1">
-            <div style="font-size:1.5rem;font-weight:900;color:{sig_color};letter-spacing:1px">{sig_label}</div>
-            <div style="font-size:0.9rem;color:#000;margin-top:2px">{sig_desc}</div>
-        </div>
-        <div style="text-align:right">
-            <div style="font-size:2rem;font-weight:900;color:{sig_color}">{confidence}%</div>
-            <div style="font-size:0.75rem;color:#000">信心指數</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ─── 市場狀態 + 策略型態 並排 ─────────────────────────
-    col_reg, col_mode, col_pos = st.columns(3)
-    with col_reg:
-        st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:12px 16px;border-left:4px solid {regime_clr}">
-            <div style="font-size:0.72rem;color:#000;text-transform:uppercase;letter-spacing:1px">市場狀態</div>
-            <div style="font-size:1.05rem;font-weight:700;color:{regime_clr};margin-top:4px">{regime_icon} {regime_txt}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col_mode:
-        st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:12px 16px;border-left:4px solid #4FC3F7">
-            <div style="font-size:0.72rem;color:#000;text-transform:uppercase;letter-spacing:1px">策略型態</div>
-            <div style="font-size:1.05rem;font-weight:700;color:#4FC3F7;margin-top:4px">📐 {mode_display}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col_pos:
-        st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:12px 16px;border-left:4px solid {pos_clr}">
-            <div style="font-size:0.72rem;color:#000;text-transform:uppercase;letter-spacing:1px">建議倉位</div>
-            <div style="font-size:1.05rem;font-weight:700;color:{pos_clr};margin-top:4px">{pos_icon} {pos_txt}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("<div style='margin-top:12px'></div>", unsafe_allow_html=True)
-
-    # ─── 信心度進度條 ──────────────────────────────────────
-    bar_filled = int(confidence / 10)
-    bar_html = "".join([
-        f'<div style="flex:1;height:10px;border-radius:4px;background:{"#00C851" if i < bar_filled and confidence >= 70 else "#FFB300" if i < bar_filled and confidence >= 40 else "#FF4B4B" if i < bar_filled else "rgba(255,255,255,0.1)"};margin-right:3px;transition:all 0.3s"></div>'
-        for i in range(10)
-    ])
-    st.markdown(f"""
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
-        <div style="font-size:0.8rem;color:#000;width:50px">信心度</div>
-        <div style="display:flex;flex:1">{bar_html}</div>
-        <div style="font-size:0.85rem;font-weight:700;color:{sig_color};width:36px;text-align:right">{confidence}%</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ─── Watch / Buy / 估值 狀態指示燈（僅顯示有效的）──────
-    active_tags = []
-    if watch:
-        active_tags.append("<div style='padding:5px 16px;border-radius:20px;font-size:0.82rem;font-weight:700;background:#00C851;color:white'>✅ WATCH</div>")
-    if buy:
-        active_tags.append("<div style='padding:5px 16px;border-radius:20px;font-size:0.82rem;font-weight:700;background:#00C851;color:white'>✅ BUY</div>")
-    if valuation_warning:
-        active_tags.append("<div style='padding:5px 16px;border-radius:20px;font-size:0.82rem;font-weight:700;background:rgba(255,179,0,0.2);color:#FFB300'>⚠️ 估值偏高</div>")
-    if not watch and not buy:
-        active_tags.append("<div style='padding:5px 16px;border-radius:20px;font-size:0.82rem;font-weight:600;background:rgba(60,60,60,0.3);color:#888'>○ 條件未達進場門檻</div>")
-    if active_tags:
-        st.markdown(f"<div style='display:flex;gap:8px;flex-wrap:wrap;margin:10px 0'>{''.join(active_tags)}</div>", unsafe_allow_html=True)
-
-    # ─── 交易執行卡片（僅 Buy 顯示）─────────────────────────
-    if buy or signal == "Buy":
-        st.markdown("#### 📋 交易執行卡片")
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        with mc1:
-            st.metric("📥 參考進場價", f"${entry_price:.2f}" if entry_price else "N/A")
-        with mc2:
-            st.metric("🛡️ 停損價", f"${stop_loss_price:.2f}" if stop_loss_price else "N/A",
-                      delta=f"-{risk_pct:.1f}%" if risk_pct else None,
-                      delta_color="inverse")
-        with mc3:
-            st.metric("📏 ATR (14)", f"{atr:.2f}" if atr else "N/A")
-        with mc4:
-            st.metric("⚡ 風險 %", f"{risk_pct:.2f}%" if risk_pct else "N/A")
-        if stop_loss_method:
-            st.caption(f"🔧 停損方法：{stop_loss_method}")
-        st.markdown("<hr style='border-color:rgba(255,255,255,0.1);margin:16px 0'>", unsafe_allow_html=True)
-
-    # ─── 策略細節與備註 (判斷理由 + 出場 + 不買) ─────────────────
-    reasons_list = engine.get("reasons", [])
-    if isinstance(reasons_list, list) and reasons_list:
-        reason_text = "；".join(str(r) for r in reasons_list if r)
-    else:
-        reason_text = str(reason) if reason else ""
+    # 左側：主要決策卡片
+    col_main, col_detail = st.columns([2, 3])
+    with col_main:
+        if signal == "Buy":
+            st.success(f"""
+            **✅ Buy 訊號觸發**
+            
+            信心度：{confidence}%  
+            Mode：{mode}  
+            建議倉位：{position_level}
+            """)
+            st.caption("條件完整，可執行交易")
+        elif signal == "Watch":
+            st.warning(f"""
+            **👀 Watchlist 觀察中**
+            
+            信心度：{confidence}%  
+            Mode：{mode}
+            """)
+            st.caption("值得盯，但尚未觸發買點")
+        elif signal == "Exit":
+            st.error(f"""
+            **🚪 Exit 出場訊號**
+            
+            信心度：{confidence}%  
+            Mode：{mode}
+            """)
+            st.caption("建議考慮出場或減碼")
+        else:
+            st.info("""
+            **目前無明確進場設定**
+            
+            市場狀態或結構尚未符合條件
+            """)
+    
+    # 右側：詳細資訊
+    with col_detail:
+        # 市場狀態
+        if market_regime == "BULL":
+            regime_icon = "📈"
+            regime_txt = "BULL（多頭市場）"
+            regime_color = COLOR_UP
+        elif market_regime == "NEUTRAL":
+            regime_icon = "📊"
+            regime_txt = "NEUTRAL（盤整市場）"
+            regime_color = "#FFA000" # 深橘色
+        elif market_regime == "BEAR":
+            regime_icon = "📉"
+            regime_txt = "BEAR（空頭市場）"
+            regime_color = COLOR_DOWN
+        else:
+            regime_icon = "❓"
+            regime_txt = "未知"
+            regime_color = "#757575" # 灰色
         
-    has_notes = bool(exit_conditions) or (not_buy_reasons and not buy) or bool(reason_text)
+        # 信心度進度條
+        st.markdown(f"**市場狀態**：{regime_icon} {regime_txt}")
+        st.markdown(f"**策略型態**：Mode {mode or '-'}")
+        st.progress(confidence / 100, text=f"信心度：{confidence}%")
+        
+        # Watch / Buy 狀態
+        col_wb1, col_wb2 = st.columns(2)
+        with col_wb1:
+            if watch:
+                st.markdown("**Watch**：✅ 是")
+            else:
+                st.markdown("**Watch**：❌ 否")
+        with col_wb2:
+            if buy:
+                st.markdown("**Buy**：✅ 是")
+            else:
+                st.markdown("**Buy**：❌ 否")
+        
+        # 估值警示
+        if valuation_warning:
+            st.warning("⚠️ 估值警示：EPS 偏高或 PE 昂貴")
+        
+        # 理由說明
+        if reason:
+            st.markdown("---")
+            st.markdown(f"**判斷理由**：")
+            st.caption(reason)
+    
+    # ===== 📋 完整交易卡片區塊 =====
+    if buy or signal == "Buy":
+        st.markdown("### 📋 交易執行卡片")
+        col_card1, col_card2, col_card3 = st.columns(3)
+        
+        with col_card1:
+            st.metric("建議倉位", position_level)
+            if atr:
+                st.metric("ATR (14)", f"{atr:.2f}")
+        
+        with col_card2:
+            entry_price = engine.get("entry_price", curr['Close'])
+            if entry_price:
+                st.metric("參考進場價", f"${entry_price:.2f}")
+            if stop_loss_price:
+                st.metric("停損價", f"${stop_loss_price:.2f}")
+        
+        with col_card3:
+            if risk_pct:
+                st.metric("風險 %", f"{risk_pct:.2f}%")
+            if stop_loss_method:
+                st.caption(f"停損方法：{stop_loss_method}")
+        
+        st.markdown("---")
+    
+    # ===== 🚪 出場條件區塊 =====
+    if exit_conditions:
+        st.markdown("### 🚪 出場條件提醒")
+        for cond in exit_conditions:
+            if "趨勢破壞" in cond or "過熱" in cond:
+                st.error(f"🔥 {cond}")  # 紅色：嚴重警示
+            elif "防守出場" in cond or "趨勢結束" in cond:
+                st.warning(f"⚠️ {cond}")  # 黃色：標準出場
+            elif "短線轉弱" in cond:
+                st.info(f"📉 {cond}")     # 藍色：早期預警
+            else:
+                st.info(f"ℹ️ {cond}")
+        st.markdown("---")
+    
+    # ===== ❌ 不買入原因區塊（僅在非 Buy 時顯示）=====
+    if not_buy_reasons and not buy:
+        with st.expander("❌ 不買入原因", expanded=False):
+            for reason_item in not_buy_reasons:
+                st.caption(f"• {reason_item}")
+    
+    st.markdown("---")
+
+    # 若 session 有最近一次外資轉向事件，且屬於此股票，於頁面頂部顯示橫幅
+    last_key = f'last_chip_switch_{stock_id}'
+    if last_key in st.session_state:
+        evt = st.session_state[last_key]
+        if '賣轉買' in evt['type']:
+            st.success(f"🚨 外資近期轉向 (最新): {evt['date']} — {evt['type']}：{evt['prev']:.0f} → {evt['last']:.0f} 張")
+        else:
+            st.warning(f"⚠️ 外資近期轉向 (最新): {evt['date']} — {evt['type']}：{evt['prev']:.0f} → {evt['last']:.0f} 張")
+    
 
     
-    if has_notes:
-        total_items = (len(exit_conditions) if exit_conditions else 0) + \
-                      (len(not_buy_reasons) if not_buy_reasons and not buy else 0)
-                      
-        expander_label = f"📋 策略備註與細節 ({total_items} 項)"
-        with st.expander(expander_label, expanded=False):
-            # 1. 核心判斷理由 (原本在外面，現在收進來最上方)
-            if reason_text:
-                st.markdown(f"""
-                <div style="background:rgba(255,255,255,0.05); border-left:4px solid #4a90e2; padding:12px 16px; margin-bottom:16px; border-radius:6px">
-                    <div style="font-size:0.95rem; color:#666; font-weight:600; margin-bottom:6px">💬 核心判斷理由</div>
-                    <div style="font-size:1.15rem; color:#111; font-weight:700; line-height:1.5">{reason_text}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            # 2. 出場與不買理由 (並排或分段)
-            if exit_conditions or (not_buy_reasons and not buy):
-                col_ex, col_nbr = st.columns(2) if (exit_conditions and (not_buy_reasons and not buy)) else (st.container(), st.container())
-                
-                with col_ex:
-                    if exit_conditions:
-                        st.markdown("<div style='font-size:0.78rem;color:#000;font-weight:700;margin-bottom:6px'>🚪 出場條件</div>", unsafe_allow_html=True)
-
-                        for cond in exit_conditions:
-                            if any(k in cond for k in ["趨勢破壞", "過熱", "死叉"]):
-                                clr, bg, icon = "#FF4B4B", "rgba(255,75,75,0.1)", "🔥"
-                            elif any(k in cond for k in ["防守出場", "趨勢結束", "MA20下彎", "跌破季線"]):
-                                clr, bg, icon = "#FFB300", "rgba(255,179,0,0.1)", "⚠️"
-                            else:
-                                clr, bg, icon = "#4FC3F7", "rgba(79,195,247,0.1)", "📉"
-                            
-                            st.markdown(f"""
-                            <div style="display:flex; align-items:center; background:{bg}; border-radius:6px; padding:6px 12px; margin-bottom:4px; border-left:3px solid {clr}">
-                                <span style="margin-right:8px">{icon}</span>
-                                <span style="font-size:0.85rem; color:#000; font-weight:500">{cond}</span>
-                            </div>
-                            """, unsafe_allow_html=True)
-
-                with col_nbr:
-                    if not_buy_reasons and not buy:
-                        st.markdown("<div style='font-size:1rem;color:#d32f2f;font-weight:700;margin-bottom:8px'>❌ 不買入原因</div>", unsafe_allow_html=True)
-                        for r in not_buy_reasons:
-                            st.markdown(f"""
-                            <div style="font-size:1rem; color:#111; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.08); font-weight:500;">
-                                • {r}
-                            </div>
-                            """, unsafe_allow_html=True)
-
-    st.markdown("<div style='margin-bottom:20px'></div>", unsafe_allow_html=True)
-
     # 1. 估值面
     st.subheader("1️⃣ 估值面診斷 (相對標準)")
     c1, c2 = st.columns(2)
     val_score = 0
     with c1:
-        if fundamentals['EPS'] is not None and fundamentals['EPS'] < 0:
-            check_item("本益比 P/E", "無 (虧損)", False, "")
-        else:
-            check_item("本益比 P/E", fundamentals['PE'], fundamentals['PE'] < 30, "(< 30 合理)")
-            peg_val = fundamentals['PEG']
-            
-            # 背後加分邏輯保留，但不顯示 PEG UI
-            if peg_val is not None and peg_val != float('inf'):
-                if peg_val <= 1.2:
-                    val_score += 1
-                
-            if fundamentals['PE'] < 25: val_score += 1
+        check_item("本益比 P/E", fundamentals['PE'], fundamentals['PE'] < 30, "(< 30 合理)")
+        peg_val = fundamentals['PEG'] if fundamentals['PEG'] is not None else float('inf')
+        p2 = check_item("成長修正 PEG", peg_val, peg_val <= 1.2, "(標準 ≤ 1.2)")
+        if fundamentals['PE'] < 25: val_score +=1
+        if p2: val_score +=1
     with c2:
         gw_val = fundamentals['Growth'] if fundamentals['Growth'] is not None else 0
         check_item("EPS 成長率 (YoY)", gw_val * 100, gw_val > 0.1, "% (需 > 10)")
@@ -1370,7 +2232,39 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     else: st.error(f"💀 估值評價：昂貴或衰退 ({val_score}/4)")
     st.markdown("---")
 
+    # 2. 技術面
+    col_trend, col_mom, col_vol = st.columns(3)
+    with col_trend:
+        st.subheader("2️⃣ 趨勢結構 (Trend)")
+        ma5_val = curr['MA5']
+        ma20_val = curr['MA20']
+        ma60_val = curr['MA60']
+        slope_ok = df['MA60_Rising'].iloc[-1]
+        is_short_strong = ma5_val >= ma20_val
+        check_item("短線趨勢 (MA5/20)", ma5_val - ma20_val, is_short_strong, "(MA5 > MA20)")
+        t1 = check_item("均線排列 (MA20/60)", curr['MA20'] - curr['MA60'], curr['MA20'] >= curr['MA60'], "(多頭)")
+        t2 = check_item(f"股價 vs 季線({ma60_val:.0f})", curr['Close'], curr['Close'] >= ma60_val, "(線上)")
+        t3 = check_item("季線方向", "上彎" if slope_ok else "走平/下彎", slope_ok, "")
+        trend_pass = t1 and t2 and t3
 
+    with col_mom:
+        st.subheader("3️⃣ 動能訊號 (Momentum)")
+        rsi_cross = (prev['RSI'] < 40) and (curr['RSI'] >= 40)
+        macd_up = (curr['MACD_Hist'] > 0) and (curr['MACD_Hist'] > prev['MACD_Hist'])
+        check_item("RSI 強度", f"{curr['RSI']:.1f}", curr['RSI'] >= 50, "(>50 多方區)")
+        check_item("MACD 攻擊", "是" if macd_up else "否", macd_up, "(紅柱增長)")
+        mom_pass = rsi_cross or macd_up or (curr['RSI'] >= 50 and macd_up)
+
+    with col_vol:
+        st.subheader("4️⃣ 價量確認 (Volume)")
+        high_60 = curr['High_60']
+        breakout = curr['Close'] > high_60
+        vol_ratio = curr['Volume'] / curr['Vol_MA20']
+        check_item("突破前高", f"{high_60:.2f}", breakout, "(壓力價)")
+        check_item("攻擊量能", f"{vol_ratio:.2f}倍", vol_ratio >= 1.3, "(> 1.3倍)")
+        pv_pass = breakout or (vol_ratio >= 1.3)
+
+    st.markdown("---")
 
     # 5. 籌碼面
     if df_chips is not None and not df_chips.empty:
@@ -1385,80 +2279,30 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
             if pd.isna(last_chip['Net_Buy']):
                 st.warning("⚠️ 查無外資數據 (盤中可能尚未更新)")
             else:
+                c_color = COLOR_UP if last_chip['Net_Buy'] > 0 else COLOR_DOWN
                 net_buy_val = last_chip['Net_Buy']
-                c_color = COLOR_UP if net_buy_val > 0 else COLOR_DOWN
-                
-                # 計算連續買賣超天數
-                consecutive_days = 0
-                is_buying = net_buy_val > 0
-                is_selling = net_buy_val < 0
-                for val in reversed(aligned_chips['Net_Buy'].dropna().tolist()):
-                    if is_buying and val > 0:
-                        consecutive_days += 1
-                    elif is_selling and val < 0:
-                        consecutive_days += 1
-                    else:
-                        break
-                
-                if is_buying:
-                    consecutive_str = f"連買 {consecutive_days} 天"
-                elif is_selling:
-                    consecutive_str = f"連賣 {consecutive_days} 天"
-                else:
-                    consecutive_str = "無買賣超 (休兵)"
-                
-                # 計算單日佔比 (外資買賣超張數 / 當日總成交量)
-                # 台股 yfinance Volume 固定為股數，轉換為「張」需除以 1000
-                latest_vol = df['Volume'].iloc[-1]
-                if latest_vol > 0:
-                    vol_in_lots = latest_vol / 1000
-                    ratio = abs(net_buy_val) / vol_in_lots * 100 if vol_in_lots > 0 else 0
-                else:
-                    ratio = 0
+                st.markdown(f"**最新外資買賣超**: <span style='color:{c_color};font-weight:bold;'>{net_buy_val:.0f} 張</span>", unsafe_allow_html=True)
                 
                 recent_5_days = aligned_chips['Net_Buy'].tail(5).sum()
                 chip_status = "外資連買" if recent_5_days > 0 else "外資調節"
-                
-                # 外資轉向偵測
+                st.info(f"💡 近5日外資累計: {recent_5_days:.0f} 張 ({chip_status})")
+                # 檢測外資買賣趨勢是否發生由賣轉買或由買轉賣的轉向
                 switch = detect_chip_switch(aligned_chips)
-                switch_msg = "無明顯轉向"
-                switch_color = "#555"
                 if switch is not None:
                     kind, prev_val, last_val = switch
-                    if "賣轉買" in kind:
-                        switch_msg = f"🔥 由賣轉買"
-                        switch_color = COLOR_UP
-                    elif "買轉賣" in kind:
-                        switch_msg = f"⚠️ 由買轉賣"
-                        switch_color = COLOR_DOWN
+                    # 記錄事件於 session
+                    try:
+                        record_chip_event(stock_id, kind, prev_val, last_val, aligned_chips.index[-1])
+                    except Exception:
+                        pass
 
-                # 使用三格儀表板 UI 呈現
-                cc1, cc2, cc3 = st.columns(3)
-                with cc1:
-                    st.markdown(f"""
-                    <div style="background:rgba(0,0,0,0.03); border-radius:8px; padding:12px; border-left:4px solid {c_color}; height:110px;">
-                        <div style="font-size:0.85rem; color:#666; margin-bottom:4px">🎯 今日力道</div>
-                        <div style="font-size:1.6rem; font-weight:700; color:{c_color}; margin-bottom:4px">{net_buy_val:,.0f} 張</div>
-                        <div style="font-size:0.8rem; color:#888;">佔單日成交量 {ratio:.1f}%</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with cc2:
-                    trend_color = COLOR_UP if recent_5_days > 0 else COLOR_DOWN
-                    st.markdown(f"""
-                    <div style="background:rgba(0,0,0,0.03); border-radius:8px; padding:12px; border-left:4px solid {trend_color}; height:110px;">
-                        <div style="font-size:0.85rem; color:#666; margin-bottom:4px">📊 近5日累計</div>
-                        <div style="font-size:1.6rem; font-weight:700; color:{trend_color}; margin-bottom:4px">{recent_5_days:,.0f} 張</div>
-                        <div style="font-size:0.8rem; color:#888;">{consecutive_str}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with cc3:
-                    st.markdown(f"""
-                    <div style="background:rgba(0,0,0,0.03); border-radius:8px; padding:12px; border-left:4px solid {switch_color}; height:110px;">
-                        <div style="font-size:0.85rem; color:#666; margin-bottom:4px">🔄 關鍵轉向</div>
-                        <div style="font-size:1.2rem; font-weight:700; color:{switch_color}; margin-bottom:4px">{switch_msg}</div>
-                        <div style="font-size:0.8rem; color:#888;">方向發生改變時提醒</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    if "賣轉買" in kind:
+                        st.success(f"🚨 外資轉向：由賣轉買 — 前: {prev_val:.0f} 張 → 現: {last_val:.0f} 張")
+                    elif "買轉賣" in kind:
+                        st.warning(f"⚠️ 外資轉向：由買轉賣 — 前: {prev_val:.0f} 張 → 現: {last_val:.0f} 張")
+
+                # 顯示 session 中的外資轉向紀錄
+                render_chip_history_table(stock_id)
     else:
         if not FINMIND_AVAILABLE:
             st.warning("⚠️ FinMind 套件未安裝，無法顯示外資數據。\n安裝指令: `pip install FinMind`")
@@ -1467,7 +2311,107 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     
     st.markdown("---")
 
+    # 6. 進出場時機 (KDJ) 與 AI 綜合總結
+    st.subheader("6️⃣ 進出場時機 (KDJ) 與 AI 綜合總結")
+    
+    kdj_c1, kdj_c2 = st.columns(2)
+    with kdj_c1:
+        st.write("#### 🟢 買進/觀察訊號 (KDJ 狀態)")
+        # 直接使用引擎理由中關於 KDJ 的部分
+        kdj_msg = "KDJ 狀態：分析中..."
+        if reason:
+            kdj_parts = [p for p in reason.split("；") if "KDJ" in p]
+            if kdj_parts: kdj_msg = kdj_parts[0]
+        
+        if buy:
+            st.success(f"✨ **符合進場特徵**\n\n{kdj_msg}")
+        elif watch:
+            st.warning(f"👀 **觀察結構成立**\n\n{kdj_msg}")
+        else:
+            st.info(f"⚪ **尚未符合進場條件**\n\n{kdj_msg}")
+            
+    with kdj_c2:
+        st.write("#### 🔴 賣出/出場警示監測")
+        if exit_conditions:
+            for cond in exit_conditions:
+                st.error(f"⚠️ {cond}")
+        else:
+            st.write("✅ **目前無明顯轉弱或出場訊號** (持有續抱)")
 
+    # 一句話判定
+    summary_msg = "趨勢結構完整，請參考上方進場/出場建議執行操作。" if buy or watch else "目前不符合策略邏輯，建議觀望。"
+    st.info(f"💡 **AI 總結**：{summary_msg}")
+    st.markdown("---")
+
+    # 策略判定
+    st.subheader("🎯 AI 戰略地圖與價格分級")
+    price_defensive = curr['MA60']
+    price_breakout = curr['High_60']
+    price_current = curr['Close']
+    
+    # 根據引擎訊號決定戰略 (同步引擎引擎結果)
+    if buy:
+        action_type = "積極攻擊"
+        msg_title = "🚀 策略提示：執行買進"
+        msg_desc = f"引擎判定模式為 {mode}，目前為理想進場點。建議停損設於 {stop_loss_price if stop_loss_price else '-'}。"
+        msg_color = "success"
+    elif watch:
+        action_type = "防守等待"
+        msg_title = "🛡️ 策略提示：觀察等待"
+        msg_desc = "趨勢結構正確，但尚未出現最佳觸發點。請等待回測或帶量突破。"
+        msg_color = "info"
+    else:
+        action_type = "空手/避開"
+        msg_title = "🛑 策略提示：暫不操作"
+        msg_desc = "目前結構不符合策略。請耐心等待趨勢明朗。"
+        msg_color = "error"
+
+    if msg_color == "success": st.success(f"**{msg_title}**\n\n{msg_desc}")
+    elif msg_color == "info": st.info(f"**{msg_title}**\n\n{msg_desc}")
+    else: st.error(f"**{msg_title}**\n\n{msg_desc}")
+
+    # 價格分級表 (樣式優化)
+    row_success_style = "background-color: #1B5E20; color: #FAFAFA;" if buy else ""
+    row_info_style = "background-color: #0D47A1; color: #FAFAFA;" if watch and not buy else ""
+    
+    st.markdown(f"""
+    <table style="width:100%; text-align: left; border-collapse: collapse;">
+        <thead>
+            <tr style="border-bottom: 2px solid #444; background-color: #262730; color: #FAFAFA;">
+                <th style="padding: 8px;">角色</th>
+                <th style="padding: 8px;">價格 (約)</th>
+                <th style="padding: 8px;">策略意義</th>
+                <th style="padding: 8px;">操作建議</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr style="{row_success_style}">
+                <td style="padding: 8px;">🚀 <strong>壓力參考</strong></td>
+                <td style="padding: 8px;">{price_breakout:.2f}</td>
+                <td style="padding: 8px;">60日最高壓力</td>
+                <td style="padding: 8px;">若帶量突破，可視為新波段確認。</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px;">📍 <strong>目前市價</strong></td>
+                <td style="padding: 8px;"><strong>{price_current:.2f}</strong></td>
+                <td style="padding: 8px;">當下成交價</td>
+                <td style="padding: 8px;">目前的持倉成本參考。</td>
+            </tr>
+            <tr style="{row_info_style}">
+                <td style="padding: 8px;">🛡️ <strong>趨勢支撐</strong></td>
+                <td style="padding: 8px;"><strong>{price_defensive:.2f}</strong></td>
+                <td style="padding: 8px;">MA60 (季線)</td>
+                <td style="padding: 8px;">中期多頭生命線。</td>
+            </tr>
+            <tr style="border-top: 1px solid #444; color: #FF4B4B;">
+                <td style="padding: 8px;">🛑 <strong>停損/出場點</strong></td>
+                <td style="padding: 8px;"><strong>{stop_loss_price if stop_loss_price else "-"}</strong></td>
+                <td style="padding: 8px;">動態停損位</td>
+                <td style="padding: 8px;">跌破此價位建議執行出場。</td>
+            </tr>
+        </tbody>
+    </table>
+    """, unsafe_allow_html=True)
 
     # ========================================================
     # 📊 圖表區
@@ -1492,22 +2436,18 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     if used_fallback_full:
         st.info("📅 目前選擇的分析起始日超出可用資料範圍，線圖已自動顯示完整期間。")
 
-    # 📊 圖表區 (5列布局：K線、成交量、KDJ、外資買賣超、MACD)
+    # 📊 圖表區 (4列布局：K線、成交量、外資買賣超、MACD)
     # ========================================================
     fig = make_subplots(
-        rows=5, cols=1,
-        shared_xaxes=True,
-        row_heights=[0.32, 0.15, 0.18, 0.18, 0.17],
-        vertical_spacing=0.05,
-        subplot_titles=("K線與關鍵位", "成交量", "KDJ 指標", "外資買賣超(張)", "MACD 指標"),
-        specs=[[{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}]]
+        rows=4, cols=1, 
+        shared_xaxes=True, 
+        row_heights=[0.36, 0.18, 0.22, 0.24],
+        # 加大子圖垂直間距，讓區塊更分明
+        vertical_spacing=0.06,
+        subplot_titles=("K線與關鍵位", "成交量", "外資買賣超(張)", "MACD 指標"),
+        specs=[[{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}]]
     )
     
-    # 計算當前顯示區間的最高/最低價，用於動態縮放 Y 軸
-    y_min = df_plot['Low'].min()
-    y_max = df_plot['High'].max()
-    y_range = [y_min * 0.95, y_max * 1.05] if not pd.isna(y_min) else None
-
     # --- Row 1: K線 ---
     fig.add_trace(go.Candlestick(
         x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], 
@@ -1520,46 +2460,27 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
     
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA5'], line=dict(color='purple', width=1), name='MA5'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='#00BCD4', width=1), name='MA10'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='blue', width=2), name='MA60 (防守)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['High_60'], line=dict(color='gray', dash='dash'), name='60日高 (壓力)'), row=1, col=1)
 
-    # --- 停損線標註 (僅在合理範圍內時顯示) ---
+    # --- 停損線標註 ---
     if stop_loss_price and stop_loss_price > 0:
-        current_close = df_plot['Close'].iloc[-1] if not df_plot.empty else stop_loss_price
-        # 如果停損線偏離現價超過 30%，就不畫出來避免壓縮圖表
-        if abs(stop_loss_price - current_close) / current_close < 0.3:
-            fig.add_trace(go.Scatter(
-                x=df_plot.index, 
-                y=[stop_loss_price] * len(df_plot), 
-                line=dict(color='red', width=2, dash='dot'), 
-                name=f'停損參考 {stop_loss_price:.2f}'
-            ), row=1, col=1)
-        else:
-            # 加入空 trace 只為了在 legend 提示
-            fig.add_trace(go.Scatter(
-                x=[df_plot.index[-1]], y=[current_close],
-                mode='markers', marker=dict(color='red', opacity=0),
-                name=f'停損 {stop_loss_price:.2f} (偏離過大隱藏)',
-                showlegend=True
-            ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_plot.index, 
+            y=[stop_loss_price] * len(df_plot), 
+            line=dict(color='red', width=2, dash='dot'), 
+            name=f'停損參考 {stop_loss_price:.2f}'
+        ), row=1, col=1)
     # --- Row 2: 成交量 (顏色跟隨當日漲跌，單位改為「張」) ---
     price_change = df_plot['Close'] - df_plot['Close'].shift(1)
     colors_vol = [COLOR_UP if c >= 0 else COLOR_DOWN for c in price_change]
     volume_in_lots = df_plot['Volume'] / 1000  # 股數轉張數
-    fig.add_trace(go.Bar(x=df_plot.index, y=volume_in_lots, marker_color=colors_vol, name='成交量(張)', legend='legend2'), row=2, col=1)
+    fig.add_trace(go.Bar(x=df_plot.index, y=volume_in_lots, marker_color=colors_vol, name='成交量(張)'), row=2, col=1)
 
-    # --- Row 3: KDJ ---
-    if 'K' in df_plot.columns and 'D' in df_plot.columns:
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K'], line=dict(color='#FF8C00', width=1.2), name='K值', legend='legend3'), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D'], line=dict(color='#00BCD4', width=1.2), name='D值', legend='legend3'), row=3, col=1)
-        if 'J' in df_plot.columns:
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['J'], line=dict(color='#E040FB', width=1, dash='dot'), name='J值', legend='legend3'), row=3, col=1)
-        # 超買(80)、超賣(20) 參考線
-        fig.add_hline(y=80, line=dict(color='red', width=0.8, dash='dash'), row=3, col=1)
-        fig.add_hline(y=20, line=dict(color='green', width=0.8, dash='dash'), row=3, col=1)
-
-    # --- Row 4: 外資買賣超 ---
+    # --- Row 3: 外資買賣超 ---
     if df_chips is not None and not df_chips.empty:
-        aligned_chips = df_chips.reindex(df_plot.index).ffill()
+        aligned_chips = df_chips.reindex(df_plot.index)
         colors_chip = []
         for v in aligned_chips['Net_Buy']:
             if pd.isna(v):
@@ -1574,75 +2495,94 @@ def render_deep_checkup_view(stock_name, stock_id, result: StockAnalysisResult):
                 x=aligned_chips.index,
                 y=aligned_chips['Net_Buy'],
                 marker_color=colors_chip,
-                name='外資買賣超',
-                legend='legend4'
+                name='外資買賣超'
             ),
-            row=4,
+            row=3,
             col=1,
         )
         fig.add_trace(
             go.Scatter(
                 x=aligned_chips.index,
                 y=aligned_chips['Chip_MA5'],
-                line=dict(color='#ffd700', width=2.5, shape='spline'),
-                name='外資5MA',
-                legend='legend4'
+                line=dict(color='#ffd700', width=1.5),
+                name='外資5MA'
             ),
-            row=4,
+            row=3,
             col=1,
         )
 
-    # --- Row 5: MACD ---
+    # --- Row 4: MACD ---
     colors_macd = [COLOR_UP if v >= 0 else COLOR_DOWN for v in df_plot['MACD_Hist']]
-    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=colors_macd, name='MACD柱狀', legend='legend5'), row=5, col=1)
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DIF'], line=dict(color='#2962FF', width=1), name='DIF (快)', legend='legend5'), row=5, col=1)
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DEA'], line=dict(color='#FF6D00', width=1), name='DEA (慢)', legend='legend5'), row=5, col=1)
-
-    # 計算「無交易日」(週末 + 假日)，讓 Plotly 的 rangebreaks 跳過這些空隙
-    # 方法：找出完整日期區間內「沒有出現在 df_plot.index」的日期，排除週末後剩下的就是假日
-    _trade_dates = set(df_plot.index.normalize())
-    _full_range = pd.date_range(start=df_plot.index.min(), end=df_plot.index.max(), freq='D')
-    _holiday_dates = [
-        d.strftime('%Y-%m-%d')
-        for d in _full_range
-        if d.weekday() < 5 and d not in _trade_dates  # 非週末 且 不在交易日中 → 假日
-    ]
-    # rangebreaks: 1) 每週 sat/sun；2) 個別假日
-    _rangebreaks = [
-        dict(bounds=["sat", "mon"]),                        # 週末
-        dict(values=_holiday_dates) if _holiday_dates else None,  # 假日
-    ]
-    _rangebreaks = [rb for rb in _rangebreaks if rb is not None]
+    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=colors_macd, name='MACD柱狀'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DIF'], line=dict(color='#2962FF', width=1), name='DIF (快)'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['DEA'], line=dict(color='#FF6D00', width=1), name='DEA (慢)'), row=4, col=1)
 
     fig.update_layout(
-        height=1250,
+        height=1100,
         xaxis_rangeslider_visible=False,
         title_text=f"{stock_id} 綜合分析圖",
         hovermode='x unified',
-        legend=dict(y=1.0, yanchor="top", x=1.02, xanchor="left"),
-        legend2=dict(y=0.68, yanchor="top", x=1.02, xanchor="left"),
-        legend3=dict(y=0.53, yanchor="top", x=1.02, xanchor="left"),
-        legend4=dict(y=0.35, yanchor="top", x=1.02, xanchor="left"),
-        legend5=dict(y=0.17, yanchor="top", x=1.02, xanchor="left"),
     )
-
-    # 動態調整第1列 K線圖的 Y 軸範圍
-    if y_range:
-        fig.update_yaxes(range=y_range, row=1, col=1, autorange=False)
-
-    # 套用 rangebreaks 到所有共用的 x 軸（row1~5 在 shared_xaxes 下分別是 xaxis, xaxis2...xaxis5）
-    for _xaxis_key in ['xaxis', 'xaxis2', 'xaxis3', 'xaxis4', 'xaxis5']:
-        fig.update_layout(**{_xaxis_key: dict(rangebreaks=_rangebreaks)})
-
+    
+    # 移除邊框設定，保持圖表乾淨
+    
     # 設定 Y 軸標題
     fig.update_yaxes(title_text="成交量(張)", row=2, col=1)
-    fig.update_yaxes(title_text="KDJ", row=3, col=1)
-    fig.update_yaxes(title_text="外資買賣超", row=4, col=1)
-    fig.update_yaxes(title_text="MACD", row=5, col=1)
+    fig.update_yaxes(title_text="外資買賣超", row=3, col=1)
+    fig.update_yaxes(title_text="MACD", row=4, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
 
 # 輔助功能
+def generate_executive_summary(df, df_chips, price_current, price_ma20, price_ma60, k_curr, j_curr, d_curr, trend_ok):
+    """
+    根據各項指標產生總結建議 (Holders vs Buyers)
+    """
+    # 判斷籌碼狀態
+    chip_msg = "外資動向不明"
+    if df_chips is not None and not df_chips.empty:
+        aligned_chips = df_chips.reindex(df.index).ffill()
+        recent_5_sum = aligned_chips['Net_Buy'].tail(5).sum()
+        if recent_5_sum > 0: chip_msg = "外資近期偏多"
+        elif recent_5_sum < 0: chip_msg = "外資近期調節"
+    
+    # --- 1. 給持有者的建議 ---
+    holder_advice = ""
+    # 趨勢壞 (破季線)
+    if price_current < price_ma60:
+        holder_advice = "建議**「停損/減碼」**。股價已跌破生命線 (季線)，趨勢轉空，不宜戀戰。"
+    # 趨勢好但短線弱 (破月線)
+    elif price_current < price_ma20:
+        holder_advice = f"建議**「續抱但提高警覺」**。大趨勢仍多頭 (守季線 {price_ma60:.0f})，但短線轉弱 (破月線)。若有效跌破季線則應離場。"
+    # 強勢多頭
+    else:
+        # 高檔過熱?
+        if k_curr > 80:
+             holder_advice = "建議**「續抱並設移動停利」**。目前強勢但指標過熱，隨時留意獲利了結訊號 (如跌破 5日線)。"
+        else:
+             holder_advice = "建議**「續抱」**。股價在均線之上，趨勢健康。"
+
+    # --- 2. 給空手的建議 (想買進) ---
+    buyer_advice = ""
+    # 空頭
+    if not trend_ok:
+        buyer_advice = "建議**「觀望」**。目前趨勢偏空 (均線排列不佳或股價在季線下)，此時進場像是接刀，風險極大。"
+    else:
+        # 多頭架構，看位階
+        # 黃金交叉剛發生?
+        k_prev = df['K'].iloc[-2]
+        d_prev = df['D'].iloc[-2]
+        gold_cross = (k_curr > d_curr) and (k_prev <= d_prev)
+        
+        if gold_cross and d_curr <= 50:
+             buyer_advice = f"建議**「分批佈局」**。KDJ 低檔黃金交叉，且趨勢偏多。可嘗試進場，停損設在月線 {price_ma20:.0f}。"
+        elif k_curr > 80:
+             buyer_advice = f"建議**「觀望」**。指標已至高檔 (K>80)，現在追高風險較大。穩健者建議等待回測月線 {price_ma20:.0f} 或季線 {price_ma60:.0f} 不破再進場。"
+        else:
+             buyer_advice = f"建議**「區間操作」**。目前 {chip_msg}。若回檔至支撐位 {price_ma20:.0f} 附近可考慮承接。"
+
+    return holder_advice, buyer_advice
+
 def check_item(label, value, condition, suffix=""):
     icon = "✅" if condition else "❌"
     color = "green" if condition else "red"
@@ -1776,14 +2716,13 @@ if 'scan_results_tw50' not in st.session_state: st.session_state['scan_results_t
 if 'scan_results_sector_buy' not in st.session_state: st.session_state['scan_results_sector_buy'] = None
 if 'scan_results_sector_warn' not in st.session_state: st.session_state['scan_results_sector_warn'] = None
 if 'scan_results_ma5_breakout' not in st.session_state: st.session_state['scan_results_ma5_breakout'] = None
-if 'scan_results_ma5_breakout_ma10' not in st.session_state: st.session_state['scan_results_ma5_breakout_ma10'] = None
 if 'scan_results_ai_concept' not in st.session_state: st.session_state['scan_results_ai_concept'] = None
 
 # 從文件加載觀察清單
 if 'watchlist' not in st.session_state:
     st.session_state['watchlist'] = load_watchlist()
 
-page_options = ["🌊 市場資金流向 (法人單日板塊)", "🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA10掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
+page_options = ["🌊 市場資金流向 (法人單日板塊)", "🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
 
 def update_nav(): st.session_state['current_page'] = st.session_state['nav_radio']
 try: nav_index = page_options.index(st.session_state['current_page'])
@@ -1868,51 +2807,25 @@ if mode == "🌊 市場資金流向 (法人單日板塊)":
                 st.plotly_chart(fig, use_container_width=True)
                 
                 st.markdown("### 🏆 各板塊領頭羊 (淨買超榜)")
-                st.markdown("👇 點開板塊卡片可查看該板塊前三大買超個股明細")
                 
-                # 過濾出淨買超大於0的板塊
-                positive_sectors = [r for r in reports if r.total_net_flow > 0]
+                col1, col2, col3 = st.columns(3)
+                cols = [col1, col2, col3]
                 
-                if not positive_sectors:
-                    st.info("今日無顯著的法人淨買超板塊。")
-                else:
-                    # 分為2個欄位展示卡片（更寬廣的閱讀體驗）
-                    cols = st.columns(2)
+                # 只顯示淨流入大於 0 的前幾個板塊
+                print_idx = 0
+                for r in reports:
+                    if r.total_net_flow <= 0: continue
+                    if print_idx >= 6: break # 只顯示前 6 大板塊的明細
                     
-                    for i, r in enumerate(positive_sectors[:6]): # 顯示前6名
-                        with cols[i % 2]:
-                            # 使用 container 包裝卡片
-                            with st.container(border=True):
-                                # 利用 metric 展示總流入，更有數字感
-                                st.metric(label=f"🟢 {r.sector_name}", value=f"{r.total_net_flow:,.0f} 仟元")
-                                
-                                # 使用 expander 收納個股明細，讓預設畫面更乾淨
-                                with st.expander("📝 檢視成分股明細", expanded=(i < 2)): # 預設展開前2名的明細
-                                    top_3 = r.details[:3]
-                                    if top_3:
-                                        # 將 top3 轉換為 DataFrame 呈現，比 bullet points 更整齊
-                                        df_details = pd.DataFrame([
-                                            {"股票名稱": d.name, "代號": d.code, "買超張數": d.net_buy_sell}
-                                            for d in top_3 if d.net_buy_sell > 0
-                                        ])
-                                        if not df_details.empty:
-                                            # 套用 dataframe 隱藏 index 並調整欄寬
-                                            st.dataframe(
-                                                df_details,
-                                                hide_index=True,
-                                                use_container_width=True,
-                                                column_config={
-                                                    "股票名稱": st.column_config.TextColumn("股票名稱"),
-                                                    "代號": st.column_config.TextColumn("代號"),
-                                                    "買超張數": st.column_config.NumberColumn(
-                                                        "買超張數",
-                                                        format="%d",
-                                                    )
-                                                }
-                                            )
-                                    else:
-                                        st.write("無符合條件之個股。")
-
+                    with cols[print_idx % 3]:
+                        st.markdown(f"**{r.sector_name}**")
+                        st.caption(f"總流入: {r.total_net_flow:,.0f}")
+                        # 列出該板塊前 3 大買超股
+                        top_3 = r.details[:3]
+                        for d in top_3:
+                            if d.net_buy_sell > 0:
+                                st.write(f"- {d.name} ({d.code}): {d.net_buy_sell:,.0f}")
+                    print_idx += 1
 
 # ----------------- 頁面 A -----------------
 if mode == "🏆 台灣50 (排除金融)":
@@ -1926,7 +2839,7 @@ if mode == "🏆 台灣50 (排除金融)":
         target_list = TAIWAN50_EX_FIN_TICKERS
         
         for i, stock_id in enumerate(target_list):
-            stock_name = get_stock_display_name(stock_id)
+            stock_name = STOCK_DB.get(stock_id, {}).get("name", stock_id)
             status_text.text(f"掃描中: {stock_name} ...")
             # 掃描模式：不抓籌碼 (include_chips=False)
             res_obj = analyze_stock(stock_id, start_date, include_chips=False)
@@ -2020,87 +2933,100 @@ elif mode == "🤖 AI概念股":
 # ----------------- 頁面 B -----------------
 elif mode == "🚀 全自動量化選股 (動態類股版)":
     st.header("🚀 全自動量化選股 (動態類股版)")
-    st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
+    
+    # 資料來源切換
+    source_mode = st.radio("📡 資料來源", ["內建清單 (Manual)", "動態類股 (Dynamic - FinMind)"], horizontal=True)
     
     target_stocks = []
     scan_triggered = False
     batch_mode = False
     stock_info_map = {} # 存放動態抓取的 ID->Name 對照表
     
-    all_sectors = SectorProvider.get_sectors()
+    if source_mode == "內建清單 (Manual)":
+        sector_options = ["全部 (All)"] + list(SECTOR_LIST.keys())
+        selected_sector = st.sidebar.selectbox("📂 請選擇掃描類股：", sector_options)
         
-    # 定義需要特殊標示的電子科技類股（橘色底）
-    TECH_SECTORS = ["光電業", "半導體業", "電子工業", "電腦及週邊設備業"]
-    
-    # 建立類股按鈕網格
-    if not all_sectors:
-        st.error("無法取得類股資料，請檢查 FinMind 連線。")
-    else:
-        # 橘色按鈕樣式 CSS
-        st.markdown("""
-        <style>
-        .orange-btn > button {
-            background-color: #FF9800 !important;
-            color: white !important;
-            border: none !important;
-        }
-        .orange-btn > button:hover {
-            background-color: #F57C00 !important;
-            color: white !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+        if st.button(f"⚡ 啟動掃描 ({selected_sector})", type="primary"):
+            scan_triggered = True
+            if selected_sector == "全部 (All)": target_stocks = FULL_MARKET_DEMO[:5] # Demo limit
+            else: target_stocks = SECTOR_LIST[selected_sector]
+            
+    else: # Dynamic Mode
+        st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
+        all_sectors = SectorProvider.get_sectors()
         
-        # ===== 電子科技綜合掃描按鈕 =====
-        st.markdown("#### 🔥 快速掃描")
-        if st.button("⚡ 電子科技綜合掃描（光電/半導體/電子/電腦週邊）", type="primary", use_container_width=True, key="tech_combo_scan"):
-            with st.spinner("正在抓取【電子科技綜合】成分股..."):
-                combined_stocks = {}
-                for sec in TECH_SECTORS:
-                    sec_info = SectorProvider.get_sector_stocks_info(sec)
-                    combined_stocks.update(sec_info)
-                
-                stock_info_map = combined_stocks
-                target_stocks = list(stock_info_map.keys())
-                
-                st.session_state['last_scanned_sector'] = "電子科技綜合"
-                if target_stocks:
-                    st.success(f"已取得 {len(target_stocks)} 檔成分股（來自 {len(TECH_SECTORS)} 個類股）")
-                    scan_triggered = True
-                    batch_mode = True
-                else:
-                    st.warning("無法取得成分股，請檢查網路連線。")
+        # 定義需要特殊標示的電子科技類股（橘色底）
+        TECH_SECTORS = ["光電業", "半導體業", "電子工業", "電腦及週邊設備業"]
+        
+        # 建立類股按鈕網格
+        if not all_sectors:
+            st.error("無法取得類股資料，請檢查 FinMind 連線。")
+        else:
+            # 橘色按鈕樣式 CSS
+            st.markdown("""
+            <style>
+            .orange-btn > button {
+                background-color: #FF9800 !important;
+                color: white !important;
+                border: none !important;
+            }
+            .orange-btn > button:hover {
+                background-color: #F57C00 !important;
+                color: white !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
             
-        st.markdown("#### 📂 單一類股掃描")
-        # 每行 6 個按鈕
-        cols = st.columns(6)
-        for i, sec in enumerate(all_sectors):
-            # 判斷是否為電子科技類股，若是則套用橘色樣式
-            is_tech = sec in TECH_SECTORS
-            col = cols[i % 6]
-            
-            if is_tech:
-                # 使用 container 包裝以套用 CSS class
-                with col:
-                    st.markdown('<div class="orange-btn">', unsafe_allow_html=True)
-                    clicked = st.button(f"🔶 {sec}", use_container_width=True, key=f"sector_{sec}")
-                    st.markdown('</div>', unsafe_allow_html=True)
-            else:
-                clicked = col.button(sec, use_container_width=True, key=f"sector_{sec}")
-            
-            if clicked:
-                with st.spinner(f"正在抓取【{sec}】成分股..."):
-                    # 改用詳細資訊 (含名稱)
-                    stock_info_map = SectorProvider.get_sector_stocks_info(sec)
+            # ===== 電子科技綜合掃描按鈕 =====
+            st.markdown("#### 🔥 快速掃描")
+            if st.button("⚡ 電子科技綜合掃描（光電/半導體/電子/電腦週邊）", type="primary", use_container_width=True, key="tech_combo_scan"):
+                with st.spinner("正在抓取【電子科技綜合】成分股..."):
+                    combined_stocks = {}
+                    for sec in TECH_SECTORS:
+                        sec_info = SectorProvider.get_sector_stocks_info(sec)
+                        combined_stocks.update(sec_info)
+                    
+                    stock_info_map = combined_stocks
                     target_stocks = list(stock_info_map.keys())
                     
-                    st.session_state['last_scanned_sector'] = sec
+                    st.session_state['last_scanned_sector'] = "電子科技綜合"
                     if target_stocks:
-                        st.success(f"已取得 {len(target_stocks)} 檔成分股")
+                        st.success(f"已取得 {len(target_stocks)} 檔成分股（來自 {len(TECH_SECTORS)} 個類股）")
                         scan_triggered = True
-                        batch_mode = True # 啟用批次優化
+                        batch_mode = True
                     else:
-                        st.warning("該類股無成分股或抓取失敗。")
+                        st.warning("無法取得成分股，請檢查網路連線。")
+            
+            st.markdown("#### 📂 單一類股掃描")
+            # 每行 6 個按鈕
+            cols = st.columns(6)
+            for i, sec in enumerate(all_sectors):
+                # 判斷是否為電子科技類股，若是則套用橘色樣式
+                is_tech = sec in TECH_SECTORS
+                col = cols[i % 6]
+                
+                if is_tech:
+                    # 使用 container 包裝以套用 CSS class
+                    with col:
+                        st.markdown('<div class="orange-btn">', unsafe_allow_html=True)
+                        clicked = st.button(f"🔶 {sec}", use_container_width=True, key=f"sector_{sec}")
+                        st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    clicked = col.button(sec, use_container_width=True, key=f"sector_{sec}")
+                
+                if clicked:
+                    with st.spinner(f"正在抓取【{sec}】成分股..."):
+                        # 改用詳細資訊 (含名稱)
+                        stock_info_map = SectorProvider.get_sector_stocks_info(sec)
+                        target_stocks = list(stock_info_map.keys())
+                        
+                        st.session_state['last_scanned_sector'] = sec
+                        if target_stocks:
+                            st.success(f"已取得 {len(target_stocks)} 檔成分股")
+                            scan_triggered = True
+                            batch_mode = True # 啟用批次優化
+                        else:
+                            st.warning("該類股無成分股或抓取失敗。")
 
     # 執行掃描邏輯
     if scan_triggered and target_stocks:
@@ -2122,7 +3048,7 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
             if stock_info_map and stock_id in stock_info_map:
                 stock_name = stock_info_map[stock_id]
             else:
-                stock_name = get_stock_display_name(stock_id) 
+                stock_name = STOCK_DB.get(stock_id, {}).get("name", stock_id) 
             
             status_text.text(f"分析中 ({i+1}/{total_stocks}): {stock_id} ...")
             
@@ -2223,37 +3149,50 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
         st.write("尚無資料")
 
 # ----------------- 頁面 C -----------------
-elif mode == "📈 MA5突破MA10掃描":
-    st.header("📈 MA5 突破 MA10 掃描")
-    st.info("👇 掃描符合以下條件的股票：\n1. 股價站上5日線（close > MA5）\n2. 股價站上10日線（close > MA10）\n3. 5日線突破10日線（前一日 MA5 <= MA10，當日 MA5 > MA10）")
+elif mode == "📈 MA5突破MA20掃描":
+    st.header("📈 MA5 突破 MA20 掃描")
+    st.info("👇 掃描符合以下條件的股票：\n1. 股價站上5日線（close > MA5）\n2. 5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）")
     
-    st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
+    # 資料來源切換
+    source_mode = st.radio("📡 資料來源", ["內建清單 (Manual)", "動態類股 (Dynamic - FinMind)"], horizontal=True)
     
     target_stocks = []
     scan_triggered = False
     batch_mode = False
     stock_info_map = {}
     
-    all_sectors = SectorProvider.get_sectors()
-    
-    # 建立類股按鈕網格
-    if not all_sectors:
-        st.error("無法取得類股資料，請檢查 FinMind 連線。")
-    else:
-        # 每行 6 個按鈕
-        cols = st.columns(6)
-        for i, sec in enumerate(all_sectors):
-            if cols[i % 6].button(sec, use_container_width=True, key=f"ma5_breakout_{sec}"):
-                with st.spinner(f"正在抓取【{sec}】成分股..."):
-                    stock_info_map = SectorProvider.get_sector_stocks_info(sec)
-                    target_stocks = list(stock_info_map.keys())
-                    
-                    if target_stocks:
-                        st.success(f"已取得 {len(target_stocks)} 檔成分股")
-                        scan_triggered = True
-                        batch_mode = True
-                    else:
-                        st.warning("該類股無成分股或抓取失敗。")
+    if source_mode == "內建清單 (Manual)":
+        sector_options = ["全部 (All)"] + list(SECTOR_LIST.keys())
+        selected_sector = st.sidebar.selectbox("📂 請選擇掃描類股：", sector_options, key="ma5_breakout_sector")
+        
+        if st.button(f"⚡ 啟動掃描 ({selected_sector})", type="primary", key="ma5_breakout_scan"):
+            scan_triggered = True
+            if selected_sector == "全部 (All)": 
+                target_stocks = FULL_MARKET_DEMO[:20]  # Demo limit
+            else: 
+                target_stocks = SECTOR_LIST[selected_sector]
+    else:  # Dynamic Mode
+        st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
+        all_sectors = SectorProvider.get_sectors()
+        
+        # 建立類股按鈕網格
+        if not all_sectors:
+            st.error("無法取得類股資料，請檢查 FinMind 連線。")
+        else:
+            # 每行 6 個按鈕
+            cols = st.columns(6)
+            for i, sec in enumerate(all_sectors):
+                if cols[i % 6].button(sec, use_container_width=True, key=f"ma5_breakout_{sec}"):
+                    with st.spinner(f"正在抓取【{sec}】成分股..."):
+                        stock_info_map = SectorProvider.get_sector_stocks_info(sec)
+                        target_stocks = list(stock_info_map.keys())
+                        
+                        if target_stocks:
+                            st.success(f"已取得 {len(target_stocks)} 檔成分股")
+                            scan_triggered = True
+                            batch_mode = True
+                        else:
+                            st.warning("該類股無成分股或抓取失敗。")
     
     # 執行掃描邏輯
     if scan_triggered and target_stocks:
@@ -2274,15 +3213,15 @@ elif mode == "📈 MA5突破MA10掃描":
             if stock_info_map and stock_id in stock_info_map:
                 stock_name = stock_info_map[stock_id]
             else:
-                stock_name = get_stock_display_name(stock_id)
+                stock_name = STOCK_DB.get(stock_id, {}).get("name", stock_id)
             
             status_text.text(f"掃描中 ({i+1}/{total_stocks}): {stock_name} ({stock_id}) ...")
             
             # 使用批次抓好的資料 (若有)
             pre_df = fetched_data_map.get(stock_id) if batch_mode else None
             
-            # 使用 MA5 突破 MA10 篩選函數
-            res = ma5_breakout_ma10_filter(stock_id, start_date, pre_fetched_df=pre_df)
+            # 使用 MA5 突破 MA20 篩選函數
+            res = ma5_breakout_ma20_filter(stock_id, start_date, pre_fetched_df=pre_df)
             
             if res:
                 res['name'] = stock_name
@@ -2295,8 +3234,8 @@ elif mode == "📈 MA5突破MA10掃描":
         
         # 儲存結果
         if results:
-            df_results = pd.DataFrame(results)[['id', 'name', 'status', 'close', 'ma5', 'ma10', 'pe', 'rsi']]
-            df_results.columns = ['代號', '名稱', '狀態', '收盤價', 'MA5', 'MA10', 'PE', 'RSI']
+            df_results = pd.DataFrame(results)[['id', 'name', 'status', 'close', 'ma5', 'ma20', 'pe', 'rsi']]
+            df_results.columns = ['代號', '名稱', '狀態', '收盤價', 'MA5', 'MA20', 'PE', 'RSI']
             st.session_state['scan_results_ma5_breakout'] = df_results
             st.rerun()
         else:
@@ -2319,7 +3258,7 @@ elif mode == "📈 MA5突破MA10掃描":
             with col_a:
                 if st.button("🔍 檢視個股體檢", key="ma5_to_detail"):
                     st.session_state['target_stock'] = code_sel
-                    st.session_state['previous_page'] = "📈 MA5突破MA10掃描"
+                    st.session_state['previous_page'] = "📈 MA5突破MA20掃描"
                     st.session_state['current_page'] = "🔍 單一個股體檢"
                     st.rerun()
             with col_b:
@@ -2447,6 +3386,7 @@ elif mode == "📦 我持有的股票診斷":
             score = float(res_obj.score or 0)
             reasons = list(res_obj.reasons or [])
             # chips signal
+            chip_note = None
             try:
                 if res_obj.chips_df is not None:
                     cs = detect_chip_switch(res_obj.chips_df)
@@ -2472,7 +3412,7 @@ elif mode == "📦 我持有的股票診斷":
             return (rec, score, '; '.join(reasons))
 
         st.subheader('目前持股')
-        col_anl, _ = st.columns([1,4])
+        col_anl, col_sp = st.columns([1,4])
         with col_anl:
             if st.button('🔎 分析並建議操作（會抓即時資料，較慢）'):
                 progress = st.progress(0)
@@ -2754,7 +3694,58 @@ elif mode == "📦 我持有的股票診斷":
                 st.success('已刪除該歷史紀錄')
                 st.rerun()
 
+    st.markdown('---')
+    st.subheader("💾 資料備份與還原")
+    st.info("如果您是在 Streamlit Cloud (網頁版) 使用，系統重啟後資料會重置。請定期點選「下載備份」保存您的資料，需要時再「上傳還原」。")
+    
+    with st.expander("📤 匯出資料 (下載備份)", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                label="下載最新持股 (holdings.json)",
+                data=json.dumps(st.session_state['holdings'], ensure_ascii=False, indent=2),
+                file_name="holdings.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        with c2:
+            st.download_button(
+                label="下載歷史紀錄 (history.json)",
+                data=json.dumps(st.session_state['history'], ensure_ascii=False, indent=2),
+                file_name="history.json",
+                mime="application/json",
+                use_container_width=True
+            )
 
+    with st.expander("📥 匯入資料 (上傳還原)", expanded=False):
+        u_col1, u_col2 = st.columns(2)
+        with u_col1:
+            u_holdings = st.file_uploader("上傳 holdings.json", type=['json'])
+            if u_holdings is not None:
+                try:
+                    data = json.load(u_holdings)
+                    if isinstance(data, list):
+                        st.session_state['holdings'] = data
+                        save_json(HOLDINGS_FILE, data)
+                        st.success("成功載入持股資料！")
+                    else:
+                        st.error("格式錯誤：必須是列表 (List)")
+                except Exception as e:
+                    st.error(f"讀取失敗: {e}")
+        
+        with u_col2:
+            u_history = st.file_uploader("上傳 history.json", type=['json'])
+            if u_history is not None:
+                try:
+                    data = json.load(u_history)
+                    if isinstance(data, list):
+                        st.session_state['history'] = data
+                        save_json(HISTORY_FILE, data)
+                        st.success("成功載入歷史資料！")
+                    else:
+                        st.error("格式錯誤：必須是列表 (List)")
+                except Exception as e:
+                    st.error(f"讀取失敗: {e}")
 
 # ----------------- 頁面 D：觀察清單 -----------------
 elif mode == "⭐ 觀察清單":
@@ -2827,7 +3818,7 @@ elif mode == "🔍 單一個股體檢":
     
     if input_code:
         stock_id = normalize_stock_id(input_code)
-        stock_name = get_stock_display_name(stock_id)
+        stock_name = STOCK_DB.get(stock_id, {}).get("name", stock_id)
 
         # 上方操作按鈕列：加入觀察清單
         col_btn1, col_btn2 = st.columns([1, 5])

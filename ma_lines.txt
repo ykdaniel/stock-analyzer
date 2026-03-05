@@ -1,0 +1,47 @@
+447:     price_cols = ['買入價', '買入單價', '賣出單價', '最新價', '收盤價', '開盤價', '最高價', '最低價', 'MA5', 'MA10', 'MA20', 'MA60']
+734:         df['MA5'] = df['Close'].rolling(window=5).mean()
+742:         df['Break_Price_MA5'] = (
+743:             (df['Close'].shift(1) <= df['MA5'].shift(1)) &
+744:             (df['Close'] > df['MA5'])
+746:         df['MA5_Break_MA10'] = (
+747:             (df['MA5'].shift(1) <= df['MA10'].shift(1)) &
+748:             (df['MA5'] > df['MA10'])
+750:         df['MA5_Up'] = df['MA5'] > df['MA5'].shift(1)
+753:         df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
+754:         df['Vol_Up'] = df['Volume'] > df['Vol_MA5']
+875:             df_foreign['Chip_MA5'] = df_foreign['Net_Buy'].rolling(5).mean()
+1001: def ma5_breakout_ma20_filter(stock_id, start_date, pre_fetched_df=None):
+1003:     MA5 突破 MA20 篩選函數
+1006:     1. 股價站上5日線（close > MA5）
+1007:     2. 5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）
+1029:         ma5_curr = float(curr.get('MA5', float('nan')))
+1030:         ma5_prev = float(prev.get('MA5', float('nan')))
+1041:         # 條件2：5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）
+1062:         logger.debug("ma5_breakout_ma20_filter error for %s: %s", stock_id, e)
+1282:         ma5_val = curr['MA5']
+1287:         check_item("短線趨勢 (MA5/20)", ma5_val - ma20_val, is_short_strong, "(MA5 > MA20)")
+1511:     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA5'], line=dict(color='purple', width=1), name='MA5'), row=1, col=1)
+1556:                 y=aligned_chips['Chip_MA5'],
+1601:     主要以 `Net_Buy` 的最後兩個非 NA 值判斷；若不足則以 `Chip_MA5` 判斷。
+1617:         # 若 Net_Buy 不足以判斷，改用 Chip_MA5 的交叉
+1618:         ma = aligned_chips['Chip_MA5'].dropna()
+1724: if 'scan_results_ma5_breakout' not in st.session_state: st.session_state['scan_results_ma5_breakout'] = None
+1731: page_options = ["🌊 市場資金流向 (法人單日板塊)", "🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA20掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
+1747:         'scan_results_ma5_breakout',
+1895:                 # 短線買點偵測：價格突破 5 日線 + MA5 上穿 MA10
+1900:                     # 檢查是否有 Break_Price_MA5 和 MA5_Break_MA10 欄位
+1901:                     if 'Break_Price_MA5' in df.columns and 'MA5_Break_MA10' in df.columns:
+1904:                         has_price_break = recent_days['Break_Price_MA5'].any()
+1905:                         has_ma_cross = recent_days['MA5_Break_MA10'].any()
+2146: elif mode == "📈 MA5突破MA20掃描":
+2147:     st.header("📈 MA5 突破 MA20 掃描")
+2148:     st.info("👇 掃描符合以下條件的股票：\n1. 股價站上5日線（close > MA5）\n2. 5日線突破20日線（前一日 MA5 <= MA20，當日 MA5 > MA20）")
+2166:             if cols[i % 6].button(sec, use_container_width=True, key=f"ma5_breakout_{sec}"):
+2204:             # 使用 MA5 突破 MA20 篩選函數
+2205:             res = ma5_breakout_ma20_filter(stock_id, start_date, pre_fetched_df=pre_df)
+2219:             df_results.columns = ['代號', '名稱', '狀態', '收盤價', 'MA5', 'MA20', 'PE', 'RSI']
+2220:             st.session_state['scan_results_ma5_breakout'] = df_results
+2223:             st.session_state['scan_results_ma5_breakout'] = pd.DataFrame()
+2227:     ma5_results = st.session_state.get('scan_results_ma5_breakout')
+2233:                             key=f"ma5_breakout_df_{st.session_state['dataframe_key']}")
+2242:                     st.session_state['previous_page'] = "📈 MA5突破MA20掃描"

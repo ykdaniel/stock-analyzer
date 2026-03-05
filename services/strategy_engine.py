@@ -20,10 +20,13 @@ class StrategyEngine:
         ma60 = float(curr.get('MA60', float('nan')))
         ma60_slope = float(df['MA60'].diff().tail(5).mean()) if 'MA60' in df.columns else 0.0
         
+        ma10 = float(curr.get('MA10', float('nan')))
         if close >= ma60 and ma20 >= ma60 and ma60_slope > 0:
             return {"allow_long": True, "regime": "BULL", "reason": "多頭市場"}
         elif close >= ma60:
             return {"allow_long": True, "regime": "NEUTRAL", "reason": "盤整市場"}
+        elif not pd.isna(ma10) and close < ma10:
+            return {"allow_long": False, "regime": "BEAR", "reason": "空頭市場 (跌破MA10)"}
         else:
             return {"allow_long": False, "regime": "BEAR", "reason": "空頭市場"}
 
@@ -114,8 +117,11 @@ class StrategyEngine:
             signal_data.not_buy_reasons.append("流動性不足")
             return signal_data
             
-        ma60_extension_ratio = close / ma60 if ma60 > 0 else 1.0
-        is_overextended = ma60_extension_ratio > MAX_MA60_EXTENSION
+        # 判斷是否短線乖離過大 (取代原本 MA60 乖離)
+        # 註：這裡設定超過 MA5 的 10% 視為短線過熱，可依個人風險調整
+        MAX_MA5_EXTENSION = 1.10
+        ma5_extension_ratio = close / ma5 if ma5 > 0 else 1.0
+        is_overextended = ma5_extension_ratio > MAX_MA5_EXTENSION
         
         can_buy = True
         
@@ -147,11 +153,24 @@ class StrategyEngine:
 
         if is_overextended:
             can_buy = False
-            signal_data.not_buy_reasons.append("⛔ 買進禁止：股價乖離率偏高 (>25%)")
+            signal_data.not_buy_reasons.append(f"⛔ 買進禁止：股價乖離MA5偏高 (>{(MAX_MA5_EXTENSION-1)*100:.0f}%)")
             
         if market_regime == "BEAR":
             can_buy = False
-            signal_data.not_buy_reasons.append("⛔ 買進禁止：長線結構偏空 (BEAR)")
+            signal_data.not_buy_reasons.append("⛔ 買進禁止：跌破MA10，空頭結構 (BEAR)")
+            
+        # 籌碼面惡化檢查 (若資料框內有外資數據)
+        if 'Net_Buy' in df.columns:
+            recent_net_buy = df['Net_Buy'].tail(5)
+            if len(recent_net_buy) >= 2:
+                recent_sum = recent_net_buy.sum()
+                last_val = recent_net_buy.iloc[-1]
+                prev_val = recent_net_buy.iloc[-2]
+                
+                # 條件：近 5 日累計賣超，且最新一筆也是賣超，且有越賣越多的跡象 (或買轉賣)
+                if recent_sum < 0 and last_val < 0 and (prev_val > 0 or last_val < prev_val):
+                    can_buy = False
+                    signal_data.not_buy_reasons.append("🚫 買進禁止：外資近期轉賣/擴大賣超，籌碼轉弱")
             
         # 計算短均線斜率防雙巴
         ma5_slope = float(df['MA5'].diff().tail(3).mean()) if 'MA5' in df.columns else 0.0
@@ -173,10 +192,11 @@ class StrategyEngine:
         ma_aligned = ma5 > ma10
         slopes_up = ma5_slope > 0 and ma10_slope > 0
         close_above_ma5 = close > ma5
-        not_chasing_top = close <= ma5 * 1.05  # 不追離 MA5 超過 5% 的短線過熱股
         
+        # 之前有 close <= ma5 * 1.05，現在已經統一拉到上面 is_overextended 的 10% 判斷
+        # 所以這裡不需要重複卡 5% 限制
         if ma_aligned and close_above_ma5:
-            if slopes_up and not_chasing_top and can_buy:
+            if slopes_up and not is_overextended and can_buy:
                 # 核心無腦買進條件：MA5/MA10 多頭排列、站穩MA5、均線上揚、未過熱，且通過所有防護網
                 buy = True
                 signal_data.reasons.insert(0, "⭐ 核心觸發：MA5 > MA10 且 均線上揚 (動能確認)")
@@ -188,9 +208,9 @@ class StrategyEngine:
             elif not slopes_up:
                 watch = True
                 signal_data.reasons.insert(0, "👀 核心觀察：MA5 > MA10，但均線下彎或走平 (防假突破雙巴)")
-            elif not not_chasing_top:
+            elif is_overextended:
                 watch = True
-                signal_data.reasons.insert(0, f"👀 核心觀察：多頭強勢，但短線乖離率過高 (偏離MA5 > 5%)，等拉回")
+                signal_data.reasons.insert(0, f"👀 核心觀察：多頭強勢，但短線乖離率過高 (偏離MA5 > {(MAX_MA5_EXTENSION-1)*100:.0f}%)，等拉回")
         elif ma_aligned and not close_above_ma5:
             # 觀察狀態：多頭排列但跌破 5日線 (減碼中)
             watch = True
