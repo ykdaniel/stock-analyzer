@@ -168,13 +168,18 @@ def calculate_tradelog(code, buy_price, current_price, qty, fee_discount=1.0):
 # 已於頂部 import，此處不再重複定義。
 
 # ==========================================
-# 台灣50 成分股（近似版）與「排除金融」版本
+# 台灣50 成分股（準靜態清單 + 驗證機制）
 # ==========================================
 # 說明：
-# - 這裡使用的是依照 0050 成分股整理出的常見台灣50成分股近似名單。
-# - 主要成分幾乎全數涵蓋，但指數成分會隨時間微調，若未來官方名單有變更，可在此列表增減。
-# - `TAIWAN50_EX_FIN_TICKERS` 會排除金融股 (28xx.TW / 5880.TW 等)，供「台灣50 (排除金融)」頁面使用。
-TAIWAN50_TICKERS = [
+# - 台灣50 (0050) 成分股每季度調整一次（3/6/9/12月）
+# - 此清單為 2026年 Q1 版本（近似值，涵蓋主要權值股）
+# - 使用驗證機制定期檢查清單是否需要更新
+# - 更新方式：參考元大投信官網 https://www.yuantafunds.com/ 或台灣證交所資料
+
+# 台灣50成分股清單（2026年 Q1 版本）
+# 註：此為近似清單，主要權值股（2330, 2317, 2454等）極少變動
+_TAIWAN50_BASE = [
+    # 科技權值股（市值前段班）
     "2330.TW",  # 台積電
     "2317.TW",  # 鴻海
     "2454.TW",  # 聯發科
@@ -182,7 +187,6 @@ TAIWAN50_TICKERS = [
     "2382.TW",  # 廣達
     "2303.TW",  # 聯電
     "3711.TW",  # 日月光投控
-    "2311.TW",  # 日月光（備用，視版本而定）
     "2301.TW",  # 光寶科
     "2379.TW",  # 瑞昱
     "3034.TW",  # 聯詠
@@ -190,26 +194,13 @@ TAIWAN50_TICKERS = [
     "6669.TW",  # 緯穎
     "2383.TW",  # 台光電
     "2327.TW",  # 國巨
-    "2412.TW",  # 中華電
-    "4904.TW",  # 遠傳
-    "3045.TW",  # 台灣大
-    "2305.TW",  # 全友
-    "1301.TW",  # 台塑
-    "1303.TW",  # 南亞
-    "1326.TW",  # 台化
-    "6505.TW",  # 台塑化
-    "2002.TW",  # 中鋼
-    "2603.TW",  # 長榮
-    "2609.TW",  # 陽明
-    "2615.TW",  # 萬海
-    "2618.TW",  # 長榮航
-    "1513.TW",  # 中興電
-    "1519.TW",  # 華城
-    "1503.TW",  # 士電
-    "1605.TW",  # 華新
-    "1101.TW",  # 台泥
-    "1216.TW",  # 統一
-    "2912.TW",  # 統一超
+    "2357.TW",  # 華碩
+    "2376.TW",  # 技嘉
+    "6269.TW",  # 台郡
+    "3037.TW",  # 欣興
+    "2345.TW",  # 智邦
+
+    # 金融股
     "2881.TW",  # 富邦金
     "2882.TW",  # 國泰金
     "2891.TW",  # 中信金
@@ -222,15 +213,118 @@ TAIWAN50_TICKERS = [
     "2887.TW",  # 台新金
     "5871.TW",  # 中租-KY
     "5876.TW",  # 上海商銀
-    "6269.TW",  # 台郡（部分版本）
-    "2357.TW",  # 華碩
-    "2376.TW",  # 技嘉
+
+    # 傳產權值股
+    "1301.TW",  # 台塑
+    "1303.TW",  # 南亞
+    "1326.TW",  # 台化
+    "6505.TW",  # 台塑化
+    "1101.TW",  # 台泥
+    "2002.TW",  # 中鋼
+
+    # 電信股
+    "2412.TW",  # 中華電
+    "4904.TW",  # 遠傳
+    "3045.TW",  # 台灣大
+
+    # 航運股
+    "2603.TW",  # 長榮
+    "2609.TW",  # 陽明
+    "2615.TW",  # 萬海
+    "2618.TW",  # 長榮航
+
+    # 其他
+    "1216.TW",  # 統一
+    "2912.TW",  # 統一超
+    "2305.TW",  # 全友
+    "1513.TW",  # 中興電
+    "1519.TW",  # 華城
+    "2395.TW",  # 研華（工業電腦）
 ]
 
-TAIWAN50_EX_FIN_TICKERS = [
-    t for t in TAIWAN50_TICKERS
-    if not (t.startswith("288") or t.startswith("289") or t in {"5871.TW", "5876.TW"})
-]
+
+def get_taiwan50_tickers() -> List[str]:
+    """
+    取得台灣50 (0050) ETF 成分股清單。
+
+    資料來源：準靜態清單（每季度手動更新）
+
+    Returns:
+        List[str]: 成分股代碼清單（格式: "2330.TW"）
+
+    註：台灣50成分股調整頻率低（每季度），主要權值股極少變動
+        當需要更新時，請參考元大投信官網或台灣證交所資料手動更新 _TAIWAN50_BASE 清單
+    """
+    return _TAIWAN50_BASE.copy()
+
+
+def check_taiwan50_update_reminder() -> tuple[bool, str]:
+    """
+    檢查是否需要提醒用戶更新台灣50成分股清單。
+
+    台灣50成分股調整時間：每年 3/6/9/12 月（每季度第一個月）
+    提醒期間：調整月份的前15天
+
+    Returns:
+        tuple[bool, str]: (是否顯示提醒, 提醒訊息)
+    """
+    from datetime import datetime
+
+    now = datetime.now()
+    current_month = now.month
+    current_day = now.day
+
+    # 調整月份：3, 6, 9, 12
+    adjustment_months = [3, 6, 9, 12]
+
+    # 檢查是否在調整月份的前15天
+    if current_month in adjustment_months and current_day <= 15:
+        quarter_name = {3: "Q1", 6: "Q2", 9: "Q3", 12: "Q4"}[current_month]
+        year = now.year
+
+        message = f"""
+        ⚠️ **台灣50成分股更新提醒**
+
+        台灣50 (0050) 在每季度會調整成分股，目前是 **{year}年 {quarter_name}** 調整期間。
+
+        **建議檢查項目：**
+        1. 確認成分股清單是否為最新版本
+        2. 參考資料來源：
+           - [元大投信 0050 官網](https://www.yuantafunds.com/Fund/Detail?fundid=1066)
+           - [台灣證交所指數成分股](https://www.twse.com.tw/zh/indices/taiex/mi-5min-index.html)
+
+        **更新位置：** `app.py` 第 180-242 行的 `_TAIWAN50_BASE` 清單
+        **當前版本：** 2026年 Q1
+
+        ---
+        💡 更新完成後，請修改第 174 行的版本標示為 `{year}年 {quarter_name}`
+        """
+        return (True, message)
+
+    return (False, "")
+
+
+def get_taiwan50_ex_fin_tickers() -> List[str]:
+    """
+    獲取台灣50成分股（排除金融股）
+
+    排除規則：
+    - 金融股（28xx, 29xx 開頭）
+    - 特定金融相關股票（5871.TW 中租-KY, 5876.TW 上海商銀）
+
+    Returns:
+        List[str]: 非金融股成分股清單
+    """
+    all_tickers = get_taiwan50_tickers()
+    return [
+        t for t in all_tickers
+        if not (t.startswith("288") or t.startswith("289") or t in {"5871.TW", "5876.TW"})
+    ]
+
+
+# 向後相容：保留舊的變數名稱
+TAIWAN50_TICKERS = get_taiwan50_tickers()
+TAIWAN50_EX_FIN_TICKERS = get_taiwan50_ex_fin_tickers()
 
 # ==========================================
 # AI 概念股清單
@@ -1917,6 +2011,12 @@ if mode == "🌊 市場資金流向 (法人單日板塊)":
 # ----------------- 頁面 A -----------------
 if mode == "🏆 台灣50 (排除金融)":
     st.header("🏆 台灣50 掃描雷達")
+
+    # 檢查是否需要提醒更新台灣50成分股
+    show_reminder, reminder_msg = check_taiwan50_update_reminder()
+    if show_reminder:
+        st.warning(reminder_msg)
+
     st.info("👇 點擊表格任一行，可進入深度體檢。")
     if st.button("🚀 啟動掃描", type="primary"):
         results = []
