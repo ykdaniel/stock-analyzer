@@ -326,34 +326,6 @@ def get_taiwan50_ex_fin_tickers() -> List[str]:
 TAIWAN50_TICKERS = get_taiwan50_tickers()
 TAIWAN50_EX_FIN_TICKERS = get_taiwan50_ex_fin_tickers()
 
-# ==========================================
-# AI 概念股清單
-# ==========================================
-# 說明：涵蓋 AI 伺服器供應鏈、散熱、CoWoS 先進封裝、ASIC、網通等 AI 相關概念股
-AI_CONCEPT_TICKERS = [
-    "2330.TW",  # 台積電 (AI晶片代工)
-    "2454.TW",  # 聯發科 (AI晶片設計)
-    "2382.TW",  # 廣達 (AI伺服器)
-    "3231.TW",  # 緯創 (AI伺服器)
-    "6669.TW",  # 緯穎 (雲端伺服器)
-    "2317.TW",  # 鴻海 (AI伺服器代工)
-    "3017.TW",  # 奇鋐 (AI散熱)
-    "2345.TW",  # 智邦 (AI網通)
-    "3661.TW",  # 世芯-KY (ASIC設計)
-    "6415.TW",  # 矽力-KY (電源管理IC)
-    "2379.TW",  # 瑞昱 (網通晶片)
-    "3034.TW",  # 聯詠 (驅動IC/AI邊緣)
-    "2376.TW",  # 技嘉 (AI伺服器/顯卡)
-    "2357.TW",  # 華碩 (AI PC)
-    "3443.TW",  # 創意 (ASIC設計服務)
-    "2383.TW",  # 台光電 (CCL/AI伺服器)
-    "3037.TW",  # 欣興 (ABF載板)
-    "3711.TW",  # 日月光投控 (先進封裝)
-    "2308.TW",  # 台達電 (電源/散熱)
-    "6515.TW",  # 穎崴 (探針卡)
-]
-
-
 # SECTOR_LIST, BAD_TICKERS, EXTRA_SECTORS_FOR_DROPDOWN 已於頂部 import，此處不再定義。
 # 補充 EXTRA_SECTORS 空槽位到 SECTOR_LIST
 for s in EXTRA_SECTORS_FOR_DROPDOWN:
@@ -401,6 +373,25 @@ def _build_twse_name_map() -> dict:
     except Exception:
         pass
     return name_map
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_all_listed_tickers() -> dict:
+    """
+    從已快取的 TWSE 名稱對照表，抽取所有「上市」(.TW) 股票。
+    回傳 {ticker: name} dict，例如 {'2330.TW': '台積電'}。
+    ETF (代號 6 碼以上) 一律過濾掉。
+    """
+    name_map = _build_twse_name_map()  # {name: ticker}
+    result = {}
+    for name, ticker in name_map.items():
+        if not ticker.endswith('.TW'):
+            continue
+        code = ticker.replace('.TW', '')
+        # 過濾 ETF（代號為 6 碼或以非數字開頭）
+        if len(code) >= 6 or not code.isdigit():
+            continue
+        result[ticker] = name
+    return result
 
 
 def normalize_stock_id(code: str) -> str:
@@ -983,40 +974,65 @@ def analyze_stock(stock_id, start_date, include_chips=False) -> Optional["StockA
         score = 0
         passed_reasons = []
 
-        # --- 評分邏輯 ---
-        # 1. 估值
+        # --- 評分邏輯 (優化版) ---
+        is_red_candle = curr['Close'] > curr['Open']
+        
+        # 1. 估值與成長
         pe = info.get('trailingPE', float('inf'))
         if pe is None: pe = float('inf')
-        if pe < 25: score += 1; passed_reasons.append("PE<25")
+        eps = info.get('trailingEps', 0)
+        
+        # 排除本益比極低且衰退的價值陷阱
+        if 8 < pe < 25 and eps > 0: 
+            score += 1; passed_reasons.append("PE合理(8~25)")
         
         peg = info.get('pegRatio', float('inf'))
-        if peg is not None and peg <= 1.2: score += 1; passed_reasons.append("PEG優")
+        if peg is not None and 0 < peg <= 1.2: 
+            score += 1; passed_reasons.append("PEG優(<1.2)")
         
-        earnings_growth = info.get('earningsGrowth', None)
-        if earnings_growth is not None and earnings_growth > 0.1: 
+        earnings_growth = info.get('earningsGrowth', 0) or 0
+        if earnings_growth > 0.1: 
             score += 1; passed_reasons.append("EPS成長>10%")
-        elif info.get('trailingEps', 0) > 0: score += 0.5 
+        elif eps > 0: 
+            score += 0.5 
 
-        revenue_growth = info.get('revenueGrowth', 0)
-        if revenue_growth > 0.1: score += 1; passed_reasons.append("營收雙位數成長")
+        revenue_growth = info.get('revenueGrowth', 0) or 0
+        if revenue_growth > 0.1: 
+            score += 1; passed_reasons.append("營收雙位數成長")
 
         # 2. 趨勢
         if curr['MA20'] > curr['MA60']: score += 1; passed_reasons.append("均線多頭")
         if curr['Close'] > curr['MA60']: score += 1; passed_reasons.append("站上季線")
         if curr['MA60_Rising']: score += 1; passed_reasons.append("季線上彎")
 
-        # 3. 動能
-        rsi_golden_cross = (prev['RSI'] < 40) and (curr['RSI'] >= 40)
-        if rsi_golden_cross: score += 1; passed_reasons.append("RSI翻揚")
-        macd_turning_up = (curr['MACD_Hist'] > 0) and (curr['MACD_Hist'] > prev['MACD_Hist'])
-        if macd_turning_up: score += 1; passed_reasons.append("MACD轉強")
+        # 3. 動能 (加強右側確認與過濾雜訊)
+        # RSI 突破 50 中軸且當日收紅，確保趨勢轉多
+        rsi_golden_cross = (prev['RSI'] <= 50) and (curr['RSI'] > 50)
+        if rsi_golden_cross and is_red_candle: 
+            score += 1; passed_reasons.append("RSI強勢翻揚")
+            
+        # MACD 黃金交叉 (柱狀體由負轉正，濾掉盤整微幅跳動)
+        macd_golden_cross = (prev['MACD_Hist'] <= 0) and (curr['MACD_Hist'] > 0)
+        if macd_golden_cross: 
+            score += 1; passed_reasons.append("MACD黃金交叉")
 
-        # 4. 價量
-        if curr['Close'] > curr['High_60']: score += 1; passed_reasons.append("突破前高")
+        # 4. 價量 (爆量必須是攻擊量)
+        if curr['Close'] > curr['High_60']: 
+            score += 1; passed_reasons.append("突破前高")
+            
         vol_ratio = curr['Volume'] / curr['Vol_MA20']
-        if vol_ratio >= 1.3: score += 1; passed_reasons.append("爆量")
+        # 爆量 (1.5倍以上) 且收紅Ｋ、收盤價大於昨日收盤，避免選到爆量出貨跌停
+        if vol_ratio >= 1.5 and is_red_candle and (curr['Close'] > prev['Close']): 
+            score += 1; passed_reasons.append("帶量上攻")
 
         final_score = (score / 10) * 100
+        
+        # 5. 扣分/否決機制 (Veto)
+        # 致命傷：如果公司虧損 (EPS <= 0) 且營收衰退/沒成長，最高只能拿 50 分
+        if eps <= 0 and revenue_growth <= 0:
+            if final_score > 50:
+                final_score = 50
+                passed_reasons.append("⚠️虧損衰退降級")
         
         fundamentals = {
             "PE": pe, "EPS": info.get('trailingEps', 0), 
@@ -1860,7 +1876,6 @@ def go_back_logic():
 # ==========================================
 # 6. 主程式 - 側邊欄與頁面導航
 # ==========================================
-st.sidebar.title("🎮 功能選單")
 if 'current_page' not in st.session_state: st.session_state['current_page'] = "🏆 台灣50 (排除金融)"
 if 'previous_page' not in st.session_state: st.session_state['previous_page'] = "🏆 台灣50 (排除金融)"
 if 'target_stock' not in st.session_state: st.session_state['target_stock'] = None
@@ -1871,7 +1886,6 @@ if 'scan_results_sector_buy' not in st.session_state: st.session_state['scan_res
 if 'scan_results_sector_warn' not in st.session_state: st.session_state['scan_results_sector_warn'] = None
 if 'scan_results_ma5_breakout' not in st.session_state: st.session_state['scan_results_ma5_breakout'] = None
 if 'scan_results_ma5_breakout_ma10' not in st.session_state: st.session_state['scan_results_ma5_breakout_ma10'] = None
-if 'scan_results_ai_concept' not in st.session_state: st.session_state['scan_results_ai_concept'] = None
 
 # 從文件加載觀察清單
 if 'watchlist' not in st.session_state:
@@ -1879,18 +1893,181 @@ if 'watchlist' not in st.session_state:
 
 page_options = ["🌊 市場資金流向 (法人單日板塊)", "🏆 台灣50 (排除金融)", "🤖 AI概念股", "🚀 全自動量化選股 (動態類股版)", "📈 MA5突破MA10掃描", "📦 我持有的股票診斷", "⭐ 觀察清單", "🔍 單一個股體檢"]
 
-def update_nav(): st.session_state['current_page'] = st.session_state['nav_radio']
-try: nav_index = page_options.index(st.session_state['current_page'])
-except ValueError: nav_index = 0
+# ── 側邊欄自訂樣式 ──────────────────────────────────────────
+st.markdown("""
+<style>
+/* 側邊欄背景微調 */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #1a1d27 0%, #0e1117 100%);
+    color: #FAFAFA; /* 確保所有文字在深色背景下可見 */
+}
 
-st.sidebar.radio("請選擇模式", page_options, index=nav_index, key="nav_radio", on_change=update_nav)
+/* Banner 標題 */
+.sidebar-banner {
+    background: linear-gradient(135deg, #ff4b4b22 0%, #ff8c0022 100%);
+    border: 1px solid #ff4b4b44;
+    border-radius: 12px;
+    padding: 14px 16px 10px 16px;
+    margin-bottom: 18px;
+    text-align: center;
+}
+.sidebar-banner h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #FAFAFA;
+    letter-spacing: 0.04em;
+}
+.sidebar-banner p {
+    margin: 4px 0 0 0;
+    font-size: 0.72rem;
+    color: #aaa;
+    letter-spacing: 0.03em;
+}
+
+/* 分組標題 */
+.nav-group-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #999;
+    margin: 14px 0 6px 4px;
+    padding-left: 2px;
+    border-left: 2px solid #ff4b4b66;
+}
+
+/* 導航按鈕 — 通用 */
+[data-testid="stSidebar"] div[data-testid="stButton"] > button {
+    width: 100%;
+    text-align: left;
+    background: rgba(255,255,255,0.04) !important;
+    border: 1px solid rgba(255,255,255,0.09) !important;
+    border-radius: 9px;
+    color: #d0d0d0 !important;
+    font-size: 0.88rem;
+    padding: 9px 14px;
+    margin-bottom: 4px;
+    transition: all 0.18s ease;
+    cursor: pointer;
+    line-height: 1.4;
+}
+/* 強制按鈕內 p / span 顯示亮色 (dark mode 修正) */
+[data-testid="stSidebar"] div[data-testid="stButton"] > button p,
+[data-testid="stSidebar"] div[data-testid="stButton"] > button span {
+    color: #d0d0d0 !important;
+}
+[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
+    background: rgba(255, 75, 75, 0.15) !important;
+    border-color: #ff4b4b66 !important;
+    color: #fff !important;
+    transform: translateX(3px);
+}
+[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover p,
+[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover span {
+    color: #fff !important;
+}
+
+/* 選中按鈕高亮 */
+[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, #ff4b4b33 0%, #ff8c0022 100%) !important;
+    border-color: #ff4b4b99 !important;
+    color: #fff !important;
+    font-weight: 600;
+    box-shadow: 0 2px 10px rgba(255,75,75,0.2);
+}
+[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] p,
+[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] span {
+    color: #fff !important;
+    font-weight: 600;
+}
+
+/* 日期區塊 */
+.date-section {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-top: 18px;
+}
+.date-section-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #bbb;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+/* 日期輸入框 — 針對 base-web 實際渲染元素 */
+[data-testid="stSidebar"] [data-baseweb="input"] {
+    background-color: #1e2130 !important;
+    border-color: rgba(255,255,255,0.15) !important;
+}
+[data-testid="stSidebar"] [data-baseweb="input"] input,
+[data-testid="stSidebar"] [data-baseweb="input"] div,
+[data-testid="stSidebar"] [data-baseweb="input"] span {
+    color: #e8e8e8 !important;
+    background-color: transparent !important;
+    -webkit-text-fill-color: #e8e8e8 !important;
+}
+[data-testid="stSidebar"] [data-testid="stDateInput"] label,
+[data-testid="stSidebar"] [data-testid="stDateInput"] p {
+    color: #d0d0d0 !important;
+}
+
+/* 側邊欄通用：label / p / span 全強制亮色 */
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] span {
+    color: #d0d0d0 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ── 側邊欄 Banner ───────────────────────────────────────────
+with st.sidebar:
+    st.markdown("""
+    <div class="sidebar-banner">
+        <h2>🎮 股票分析儀</h2>
+        <p>Taiwan Stock Intelligence Platform</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ── 導航按鈕群組定義 ──────────────────────────────────────────
+_NAV_GROUPS = [
+    ("🌍 市場概況", [
+        "🌊 市場資金流向 (法人單日板塊)",
+    ]),
+    ("🔬 掃描工具", [
+        "🏆 台灣50 (排除金融)",
+        "🚀 全自動量化選股 (動態類股版)",
+        "📈 MA5突破MA10掃描",
+    ]),
+    ("📁 個人管理", [
+        "📦 我持有的股票診斷",
+        "⭐ 觀察清單",
+        "🔍 單一個股體檢",
+    ]),
+]
+
+def _nav_click(page: str):
+    st.session_state['current_page'] = page
+
+with st.sidebar:
+    for group_label, group_pages in _NAV_GROUPS:
+        st.markdown(f'<div class="nav-group-label">{group_label}</div>', unsafe_allow_html=True)
+        for page in group_pages:
+            is_active = st.session_state['current_page'] == page
+            btn_type = "primary" if is_active else "secondary"
+            if st.button(page, key=f"nav_{page}", use_container_width=True, type=btn_type, on_click=_nav_click, args=(page,)):
+                pass  # on_click handles the state update
 
 
 def clear_temp_data():
     """清除會受條件改變影響的暫存結果，避免 UI 顯示舊資料。"""
     for k in [
         'scan_results_tw50',
-        'scan_results_ai_concept',
         'scan_results_sector_buy',
         'scan_results_sector_warn',
         'scan_results_ma5_breakout',
@@ -1900,13 +2077,19 @@ def clear_temp_data():
         st.session_state.pop(k, None)
 
 
-# 預設為一個月前
-default_start_date = pd.Timestamp.today() - pd.DateOffset(months=1)
-start_date = st.sidebar.date_input(
-    "分析起始日", 
-    default_start_date,
-    help="主要影響趨勢圖的顯示範圍，不影響技術指標與策略判斷的計算"
-)
+# ── 日期選擇器 ─────────────────────────────────────────────
+with st.sidebar:
+    st.markdown('<div class="date-section">', unsafe_allow_html=True)
+    st.markdown('<div class="date-section-label">📅 分析起始日</div>', unsafe_allow_html=True)
+    # 預設為一個月前
+    default_start_date = pd.Timestamp.today() - pd.DateOffset(months=1)
+    start_date = st.date_input(
+        "",
+        default_start_date,
+        label_visibility="collapsed",
+        help="主要影響趨勢圖的顯示範圍，不影響技術指標與策略判斷的計算"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # 偵測分析起始日是否變更，若有變更則清空暫存資料
 prev_start = st.session_state.get('prev_analysis_start_date')
@@ -2055,68 +2238,6 @@ if mode == "🏆 台灣50 (排除金融)":
             st.session_state['current_page'] = "🔍 單一個股體檢"
             st.rerun()
 
-# ----------------- 頁面 A2：AI概念股 -----------------
-elif mode == "🤖 AI概念股":
-    st.header("🤖 AI 概念股掃描雷達")
-    st.info("👇 點擊表格任一行，可進入深度體檢。涵蓋 AI 伺服器、散熱、CoWoS、ASIC 等核心 AI 供應鏈。")
-    if st.button("🚀 啟動掃描", type="primary", key="ai_concept_scan"):
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        target_list = AI_CONCEPT_TICKERS
-        
-        for i, stock_id in enumerate(target_list):
-            # 動態取得股票名稱（優先 STOCK_DB → FinMind → yfinance）
-            stock_name = get_stock_display_name(stock_id)
-            status_text.text(f"掃描中: {stock_name} ...")
-            # 掃描模式：不抓籌碼 (include_chips=False)
-            res_obj = analyze_stock(stock_id, start_date, include_chips=False)
-            if res_obj:
-                # 短線買點偵測：價格突破 5 日線 + MA5 上穿 MA10
-                df = res_obj.tech_df
-                buy_signal = "❌"
-                if df is not None and len(df) >= 2:
-                    latest = df.iloc[-1]
-                    # 檢查是否有 Break_Price_MA5 和 MA5_Break_MA10 欄位
-                    if 'Break_Price_MA5' in df.columns and 'MA5_Break_MA10' in df.columns:
-                        # 檢查最近 3 天內是否有觸發買點訊號
-                        recent_days = df.tail(3)
-                        has_price_break = recent_days['Break_Price_MA5'].any()
-                        has_ma_cross = recent_days['MA5_Break_MA10'].any()
-                        if has_price_break and has_ma_cross:
-                            buy_signal = "🔥 買點"
-                        elif has_price_break or has_ma_cross:
-                            buy_signal = "⚡ 觀察"
-                
-                results.append({
-                    "代號": stock_id, "名稱": stock_name, "分數": int(res_obj.score),
-                    "短線買點": buy_signal,
-                    "收盤價": res_obj.fundamentals['Close'], "通過項目": res_obj.status_summary
-                })
-            progress_bar.progress((i + 1) / len(target_list))
-        progress_bar.empty()
-        status_text.empty()
-        if results:
-            # 優先顯示有買點的股票
-            df_results = pd.DataFrame(results)
-            df_results['_sort_key'] = df_results['短線買點'].map({'🔥 買點': 0, '⚡ 觀察': 1, '❌': 2})
-            df_results = df_results.sort_values(by=['_sort_key', '分數'], ascending=[True, False]).drop(columns=['_sort_key'])
-            st.session_state['scan_results_ai_concept'] = df_results
-            st.rerun()
-
-    ai_results = st.session_state.get('scan_results_ai_concept')
-    if ai_results is not None:
-        df_display = ai_results
-        event = st.dataframe(apply_table_style(df_display).hide(axis='index'), on_select="rerun", selection_mode="single-row",
-                             use_container_width=True, height=500,
-                             key=f"ai_concept_df_{st.session_state['dataframe_key']}")
-        if len(event.selection.rows) > 0:
-            idx = event.selection.rows[0]
-            st.session_state['target_stock'] = df_display.iloc[idx]['代號']
-            st.session_state['previous_page'] = "🤖 AI概念股" 
-            st.session_state['current_page'] = "🔍 單一個股體檢"
-            st.rerun()
-
 # ----------------- 頁面 B -----------------
 elif mode == "🚀 全自動量化選股 (動態類股版)":
     st.header("🚀 全自動量化選股 (動態類股版)")
@@ -2151,8 +2272,10 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
         </style>
         """, unsafe_allow_html=True)
         
-        # ===== 電子科技綜合掃描按鈕 =====
+        # ===== 快速掃描選單 =====
         st.markdown("#### 🔥 快速掃描")
+        
+        # 1. 電子科技綜合掃描
         if st.button("⚡ 電子科技綜合掃描（光電/半導體/電子/電腦週邊）", type="primary", use_container_width=True, key="tech_combo_scan"):
             with st.spinner("正在抓取【電子科技綜合】成分股..."):
                 combined_stocks = {}
@@ -2170,6 +2293,21 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
                     batch_mode = True
                 else:
                     st.warning("無法取得成分股，請檢查網路連線。")
+                    
+        # 2. 全市場上市股掃描
+        if st.button("🔍 全市場上市股綜合掃描（TWSE）", type="primary", use_container_width=True, key="quant_full_market_scan"):
+            with st.spinner("正在抓取所有上市股名單..."):
+                full_map = get_all_listed_tickers()
+                
+            if full_map:
+                st.session_state['last_scanned_sector'] = "全市場上市股"
+                st.success(f"已取得 {len(full_map)} 檔上市股開始掃描… (預計需等候 5-10 分鐘)")
+                target_stocks = list(full_map.keys())
+                stock_info_map = full_map
+                scan_triggered = True
+                batch_mode = True
+            else:
+                st.error("無法取得上市股清單，請檢查網路連線。")
             
         st.markdown("#### 📂 單一類股掃描")
         # 每行 6 個按鈕
@@ -2326,13 +2464,30 @@ elif mode == "🚀 全自動量化選股 (動態類股版)":
 elif mode == "📈 MA5突破MA10掃描":
     st.header("📈 MA5 突破 MA10 掃描")
     st.info("👇 掃描符合以下條件的股票：\n1. 股價站上5日線（close > MA5）\n2. 股價站上10日線（close > MA10）\n3. 5日線突破10日線（前一日 MA5 <= MA10，當日 MA5 > MA10）")
+
+    # ── 全市場掃描按鈕 ───────────────────────────────────────
+    st.markdown("#### 🌏 全市場掃描")
+    st.caption("自動抴取所有上市股（排除 ETF），數量約 900+ 檔，預計耐心待候 5–10 分鐘")
+    if st.button("🔍 全市場上市股掃描（TWSE）", type="primary", use_container_width=True, key="ma5_full_market_scan"):
+        with st.spinner("正在抴取所有上市股名單..."):
+            full_map = get_all_listed_tickers()  # {ticker: name}
+        if not full_map:
+            st.error("無法取得上市股清單，請檢查網路連線。")
+        else:
+            st.success(f"已取得 {len(full_map)} 檔上市股開始掃描…")
+            target_stocks = list(full_map.keys())
+            stock_info_map = full_map
+            scan_triggered = True
+            batch_mode = True
+
+    st.markdown("---")
+    st.markdown("#### 📂 單一類股掃描")
+    st.caption("💡 點擊下方類股按鈕，將自動抴取最新成分股並進行批次掃描。")
     
-    st.info("💡 點擊下方類股按鈕，將自動抓取最新成分股並進行批次掃描。")
-    
-    target_stocks = []
-    scan_triggered = False
-    batch_mode = False
-    stock_info_map = {}
+    target_stocks = locals().get('target_stocks') or []
+    scan_triggered = locals().get('scan_triggered') or False
+    batch_mode = locals().get('batch_mode') or False
+    stock_info_map = locals().get('stock_info_map') or {}
     
     all_sectors = SectorProvider.get_sectors()
     
